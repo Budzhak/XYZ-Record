@@ -1,4 +1,11 @@
-﻿﻿// XYZ Запись v16 (01.11.2026): компактный режим — в верхних углах плашки (по бокам от каски) невидимые зоны: курсор в левом углу —
+﻿// XYZ Запись v17 (01.11.2026): компакт в облике «Рамка» — без плашки и обводки: на прозрачном фоне только эмблема (каска, «db»),
+// мини-осциллограф и таймер; вокруг — мягкая тёмная тень (~35%) для читаемости на светлом фоне; полости «d»/«b» залиты тёмным (это кнопки).
+// Хит-тест: кнопки по маске, перетаскивание — за непрозрачные пиксели эмблемы; тень и прозрачные места пропускают щелчки
+// (WS_EX_TRANSPARENT по положению курсора). Кнопки «свернуть»/«закрыть» — при наведении слева и справа от каски. Рамку записи
+// без плашки не рисуем (таймер и пульс точки). Облик «Корпус» — как в v16. Нажатия мягкие: затемнение полости — под эмблемой
+// (край закрыт буквами, без ободка) с радиальным градиентом, знак при нажатии темнеет и уменьшается на 8%; маска палочек —
+// со сглаженными краями (вес по альфе букв и растушёвка по X). --snapshot-compact: test\snap17\c_*.png и b_*.png (без плашки).
+// XYZ Запись v16 (01.11.2026): компактный режим — в верхних углах плашки (по бокам от каски) невидимые зоны: курсор в левом углу —
 // плавно (~150 мс) появляется круглая тёмная кнопка «Свернуть» (–), в правом — «Закрыть» (×), размер как у кнопок полного режима (R 10).
 // Наведение на кнопку: «Свернуть» загорается янтарём (как пауза), «Закрыть» — красным (как запись). Действия те же, что у «–»/«×» полного
 // режима (PowerOff / ExitApp). Хит-тест кнопок раньше перетаскивания; каска и буквы не перекрываются. --snapshot-compact: c_corner_*.png.
@@ -80,6 +87,7 @@ namespace XyzRecorder
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
         [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
         [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+        [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int i, int v);
         [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
@@ -1711,17 +1719,22 @@ namespace XyzRecorder
         // зоны наведения 50×48 px в верхних углах плашки (каска и рулон начинаются с x≈79 и кончаются x≈139 — не задеваются).
         public static readonly PointF BMinC = new PointF(48, 44), BCloseC = new PointF(184, 44);
         public const float CornW = 50, CornH = 48;
+        // v17: облик «Рамка» — без плашки. Каска с рулоном (холст) x 78…140, y 35…85; кнопки — слева и справа от неё.
+        public static bool Bare;   // true — компакт без плашки (облик «Рамка»); ставит Render по UiState.SkinK и MainForm перед хит-тестом
+        public static readonly PointF BMinB = new PointF(62, 48), BCloseB = new PointF(158, 48);
+        public static readonly RectangleF ZoneMinB = new RectangleF(38, 24, 39, 54), ZoneCloseB = new RectangleF(143, 24, 39, 54);
         // 0 — вне углов, 1 — левый верхний (Свернуть), 2 — правый верхний (Закрыть); только внутри скруглённой плашки
         public static int CornerAt(float s, Point p)
         {
             float lx = p.X / s + X0, ly = p.Y / s + Y0;
+            if (Bare) return ZoneMinB.Contains(lx, ly) ? 1 : ZoneCloseB.Contains(lx, ly) ? 2 : 0;   // v17
             if (ly < Plate.Y || ly > Plate.Y + CornH) return 0;
             int k = lx >= Plate.X && lx <= Plate.X + CornW ? 1 : lx <= Plate.Right && lx >= Plate.Right - CornW ? 2 : 0;
             if (k == 0) return 0;
             using (var path = Theme.Round(PlateRect(s), 24 * s)) if (!path.IsVisible(p)) return 0;
             return k;
         }
-        static PointF CornC(float s, Hit h) { var c = h == Hit.CMin ? BMinC : BCloseC; return new PointF((c.X - X0) * s, (c.Y - Y0) * s); }
+        static PointF CornC(float s, Hit h) { var c = h == Hit.CMin ? (Bare ? BMinB : BMinC) : (Bare ? BCloseB : BCloseC); return new PointF((c.X - X0) * s, (c.Y - Y0) * s); }
         static bool OnCornBtn(float s, Point p, Hit h) { var c = CornC(s, h); float dx = p.X - c.X, dy = p.Y - c.Y, r = (Lay.BR + 2) * s; return dx * dx + dy * dy <= r * r; }
         static Bitmap embNT; static float embNTs = -1f;
         // Эмблема без надписи «BIM DESIGN»: стираются только бирюзовые пиксели надписи (G−R > 55) в строке надписи;
@@ -1753,6 +1766,7 @@ namespace XyzRecorder
 
         class Shape { public Bitmap Fill, Glow; public Rectangle Box; public Point GlowOff; public PointF C; }
         static float ms = -1f; static byte[] map; static int mw, mh;
+        static byte[] embA;   // v17: альфа эмблемы — перетаскивание без плашки только за непрозрачные пиксели
         static Shape[] shapes = new Shape[4];
         static PointF[] stemC = new PointF[2];
         public static string Info = "";
@@ -1770,6 +1784,7 @@ namespace XyzRecorder
             var bd = em.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
             for (int y = 0; y < h; y++) Marshal.Copy(bd.Scan0 + y * bd.Stride, px, y * w, w);
             em.UnlockBits(bd);
+            embA = new byte[n]; for (int i = 0; i < n; i++) embA[i] = (byte)((px[i] >> 24) & 255);
             var L = new bool[n]; int x0 = w, y0 = h, x1 = -1, y1 = -1;
             for (int i = 0; i < n; i++)
             {
@@ -1811,15 +1826,21 @@ namespace XyzRecorder
             for (int k = 0; k < 2; k++)
             {
                 int a0 = runs[k][0] - 1, a1 = runs[k][1] + 1; double sy = 0; int cnt = 0;
+                // v17: маска палочки без ступенек — вес по альфе и яркости буквы и растушёвка ~1,5 px на боковых срезах
+                float fe = Math.Max(1f, 1.5f * s);
                 for (int y = Math.Max(0, y0 - 2); y <= Math.Min(h - 1, y1 + 2); y++)
-                    for (int x = Math.Max(0, a0); x <= Math.Min(w - 1, a1); x++)
+                    for (int x = Math.Max(0, a0 - 3); x <= Math.Min(w - 1, a1 + 3); x++)
                     {
                         int i = y * w + x; int a = (px[i] >> 24) & 255, r = (px[i] >> 16) & 255;
-                        if (L[i]) { map[i] = 2; sy += y; cnt++; }
-                        if (r > 110 && a > 8) stemA[i] = (byte)a;
+                        if (L[i] && x >= a0 && x <= a1) { map[i] = 2; sy += y; cnt++; }
+                        float dxe = Math.Min(x - (runs[k][0] - 0.5f), (runs[k][1] + 0.5f) - x);
+                        float wx = Math.Max(0f, Math.Min(1f, 0.5f + dxe / fe));
+                        float wr = Math.Max(0f, Math.Min(1f, (r - 70) / 70f));
+                        int v = (int)(a * wx * wr + 0.5f);
+                        if (v > stemA[i]) stemA[i] = (byte)v;
                     }
                 stemC[k] = new PointF((runs[k][0] + runs[k][1]) / 2f, cnt > 0 ? (float)(sy / cnt) : (y0 + y1) / 2f);
-                sx0 = Math.Min(sx0, a0); sx1 = Math.Max(sx1, a1);
+                sx0 = Math.Min(sx0, a0 - 3); sx1 = Math.Max(sx1, a1 + 3);
             }
             int dil = Math.Max(1, (int)Math.Round(2 * s));
             var info = new StringBuilder();
@@ -1905,6 +1926,11 @@ namespace XyzRecorder
                 byte c = map[cy * mw + cx];
                 if (c == 1) return Hit.CRec; if (c == 2) return Hit.CPause; if (c == 3) return Hit.CStop;
             }
+            if (Bare)   // v17: без плашки — перетаскивание только за непрозрачные пиксели эмблемы (каска, буквы)
+            {
+                if (embA != null && cx >= 0 && cy >= 0 && cx < mw && cy < mh && embA[cy * mw + cx] > 90) return Hit.Body;
+                return Hit.None;
+            }
             using (var path = Theme.Round(PlateRect(s), 24 * s)) if (path.IsVisible(p)) return Hit.Body;
             return Hit.None;
         }
@@ -1939,32 +1965,115 @@ namespace XyzRecorder
             for (int i = 0; i < 3; i++) using (var pen = new Pen(Theme.A(c, a[i] * k), w[i] * s) { LineJoin = LineJoin.Round }) g.DrawPath(pen, p);
         }
 
+        // v17: мягкое нажатие — затемнение полости ПОД эмблемой: край маски уходит под буквы (ступенек и ободка не видно),
+        // сверху — радиальный градиент (в центре темнее, к краю мягко сходит).
+        static void Press(Graphics g, int code, float a, int ox, int oy, float s)
+        {
+            var sh = shapes[code]; if (sh == null || a <= 0.003f) return;
+            Res.DrawTint(g, sh.Fill, sh.Box.X - ox, sh.Box.Y - oy, Color.Black, 0.30f * a);
+            var r = new RectangleF(sh.Box.X - ox, sh.Box.Y - oy, sh.Box.Width, sh.Box.Height);
+            r.Inflate(1.5f * s, 1.5f * s);
+            using (var p = new GraphicsPath())
+            {
+                p.AddEllipse(r);
+                using (var br = new PathGradientBrush(p))
+                {
+                    br.CenterPoint = new PointF(sh.C.X - ox + 0.5f, sh.C.Y - oy + 0.5f + r.Height * 0.06f);
+                    br.CenterColor = Theme.A(Color.Black, 0.42f * a);
+                    br.SurroundColors = new[] { Theme.A(Color.Black, 0.10f * a) };
+                    g.FillPath(br, p);
+                }
+            }
+        }
         public static void Render(Graphics g, float s, UiState st) { Render(g, s, st, null); }
+        // v17: облик «Рамка» (SkinK → 1) — без плашки: содержимое рисуется в отдельный слой, под ним — мягкая тёмная тень
+        // (размытая альфа слоя, ~35% у края), фон прозрачный. «Корпус» (SkinK = 0) — как в v16. Переход тумблером — плавный.
+        static Bitmap lay, haloA, haloB; static int layW, layH; static float haloDiv;
         public static void Render(Graphics g, float s, UiState st, MiniWave mini)
         {
             Ensure(s);
+            float sk = Math.Max(0f, Math.Min(1f, st.SkinK));
+            Bare = sk >= 0.5f;
+            if (sk <= 0.003f) { Content(g, s, st, mini, 1f, 0f); return; }
+            int w = Off(W, s), h = Off(H, s);
+            int div = Math.Max(2, (int)Math.Round(2.5f * s));
+            if (lay == null || layW != w || layH != h || haloDiv != div)
+            {
+                if (lay != null) { lay.Dispose(); haloA.Dispose(); haloB.Dispose(); }
+                layW = w; layH = h; haloDiv = div;
+                lay = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+                haloA = new Bitmap(Math.Max(1, w / div), Math.Max(1, h / div), PixelFormat.Format32bppPArgb);
+                haloB = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+            }
+            using (var lg = Graphics.FromImage(lay)) Content(lg, s, st, mini, 1f - sk, sk);
+            // тень: слой → уменьшение (усреднение) → увеличение бикубикой, дважды — мягкий ореол радиусом ~3 px (логических)
+            using (var ia = new ImageAttributes())
+            {
+                ia.SetWrapMode(WrapMode.TileFlipXY);
+                Bitmap src = lay;
+                for (int k = 0; k < 2; k++)
+                {
+                    using (var ga = Graphics.FromImage(haloA))
+                    {
+                        ga.CompositingMode = CompositingMode.SourceCopy; ga.InterpolationMode = InterpolationMode.HighQualityBilinear; ga.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        ga.DrawImage(src, new Rectangle(0, 0, haloA.Width, haloA.Height), 0, 0, w, h, GraphicsUnit.Pixel, ia);
+                    }
+                    using (var gb = Graphics.FromImage(haloB))
+                    {
+                        gb.CompositingMode = CompositingMode.SourceCopy; gb.InterpolationMode = InterpolationMode.HighQualityBicubic; gb.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        if (k == 0) gb.DrawImage(haloA, new Rectangle(0, 0, w, h), 0, 0, haloA.Width, haloA.Height, GraphicsUnit.Pixel, ia);
+                        else using (var ic = HaloAttr()) gb.DrawImage(haloA, new Rectangle(0, 0, w, h), 0, 0, haloA.Width, haloA.Height, GraphicsUnit.Pixel, ic);
+                    }
+                    src = haloB;
+                }
+            }
+            g.CompositingMode = CompositingMode.SourceCopy; g.Clear(Color.Transparent); g.CompositingMode = CompositingMode.SourceOver;
+            Res.Draw(g, haloB, 0, Math.Max(1, (int)Math.Round(0.6f * s)), 0.38f * sk);   // ~38% у края, мягко сходит наружу
+            Res.Draw(g, lay, 0, 0, 1f);
+        }
+        // цвет тени — почти чёрный; альфа размытого слоя ×2,6 (с насыщением): у тонких линий каски, таймера и волны
+        // тень такая же плотная, как у букв, а наружу — мягкий спад
+        static ImageAttributes HaloAttr()
+        {
+            var cm = new ColorMatrix(new float[][] {
+                new float[] { 0, 0, 0, 0, 0 }, new float[] { 0, 0, 0, 0, 0 }, new float[] { 0, 0, 0, 0, 0 },
+                new float[] { 0, 0, 0, 2.6f, 0 }, new float[] { 8 / 255f, 10 / 255f, 12 / 255f, 0, 1 } });
+            var ia = new ImageAttributes(); ia.SetColorMatrix(cm); ia.SetWrapMode(WrapMode.TileFlipXY); return ia;
+        }
+        // pk — видимость плашки (1 — «Корпус»), sk — облик «Рамка» (1 — без плашки)
+        static void Content(Graphics g, float s, UiState st, MiniWave mini, float pk, float sk)
+        {
             g.CompositingMode = CompositingMode.SourceCopy; g.Clear(Color.Transparent); g.CompositingMode = CompositingMode.SourceOver;
             g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             int ox = Off(X0, s), oy = Off(Y0, s);
             float pulse = (float)(0.5 + 0.5 * Math.Sin(st.T * 2 * Math.PI * 0.8));
             float pw = 0.2f + 0.8f * st.Power;
             var pr = PlateRect(s);
-            // тень и плашка
-            for (int i = 4; i >= 1; i--)
+            if (pk > 0.003f)   // v17: плашка и её обводка (рамка записи) — только в облике «Корпус»
             {
-                var r = pr; r.Inflate(i * 1.5f * s, i * 1.5f * s); r.Offset(0, 2.5f * s);
-                using (var p = Theme.Round(r, (24 + i * 1.5f) * s)) using (var b = new SolidBrush(Color.FromArgb(18, 0, 0, 0))) g.FillPath(b, p);
+                // тень и плашка
+                for (int i = 4; i >= 1; i--)
+                {
+                    var r = pr; r.Inflate(i * 1.5f * s, i * 1.5f * s); r.Offset(0, 2.5f * s);
+                    using (var p = Theme.Round(r, (24 + i * 1.5f) * s)) using (var b = new SolidBrush(Color.FromArgb((int)(18 * pk), 0, 0, 0))) g.FillPath(b, p);
+                }
+                Color rc = st.Rec == 1 ? Theme.Mix(Theme.Teal, Theme.Red, st.RecK) : st.Rec == 2 ? Theme.Amber : Theme.Teal;
+                float ra = (st.Rec == 1 ? 0.4f + (0.03f + 0.4f * pulse) * st.RecK : st.Rec == 2 ? 0.55f : 0.36f) * pw * pk;
+                using (var p = Theme.Round(pr, 24 * s))
+                {
+                    using (var b = new LinearGradientBrush(new RectangleF(pr.X, pr.Y - 1, pr.Width, pr.Height + 2), Theme.A(Color.FromArgb(31, 35, 41), pk), Theme.A(Color.FromArgb(15, 17, 21), pk), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                    Glow(g, p, rc, s, ra);
+                    using (var pen = new Pen(Theme.A(Theme.Mix(rc, Color.White, 0.1f), ra), 1.2f * s)) g.DrawPath(pen, p);
+                }
+                var hr = pr; hr.Inflate(-2f * s, -2f * s);
+                using (var p = Theme.Round(hr, 22 * s)) using (var pen = new Pen(Color.FromArgb((int)(20 * pk), 255, 255, 255), 1f * s)) g.DrawPath(pen, p);
             }
-            Color rc = st.Rec == 1 ? Theme.Mix(Theme.Teal, Theme.Red, st.RecK) : st.Rec == 2 ? Theme.Amber : Theme.Teal;
-            float ra = (st.Rec == 1 ? 0.4f + (0.03f + 0.4f * pulse) * st.RecK : st.Rec == 2 ? 0.55f : 0.36f) * pw;
-            using (var p = Theme.Round(pr, 24 * s))
+            // v17: без плашки полости «d»/«b» залиты тёмным — это кнопки (ловят щелчки), знаки на них читаются на любом фоне
+            if (sk > 0.003f)
             {
-                using (var b = new LinearGradientBrush(new RectangleF(pr.X, pr.Y - 1, pr.Width, pr.Height + 2), Color.FromArgb(31, 35, 41), Color.FromArgb(15, 17, 21), LinearGradientMode.Vertical)) g.FillPath(b, p);
-                Glow(g, p, rc, s, ra);
-                using (var pen = new Pen(Theme.A(Theme.Mix(rc, Color.White, 0.1f), ra), 1.2f * s)) g.DrawPath(pen, p);
+                DrawS(g, 1, false, Color.FromArgb(22, 25, 30), sk, ox, oy);
+                DrawS(g, 3, false, Color.FromArgb(22, 25, 30), sk, ox, oy);
             }
-            var hr = pr; hr.Inflate(-2f * s, -2f * s);
-            using (var p = Theme.Round(hr, 22 * s)) using (var pen = new Pen(Color.FromArgb(20, 255, 255, 255), 1f * s)) g.DrawPath(pen, p);
 
             bool enR = st.IsEn(Hit.CRec), enP = st.IsEn(Hit.CPause), enS = st.IsEn(Hit.CStop);
             bool hotR = enR && st.Hot == Hit.CRec, hotP = enP && st.Hot == Hit.CPause, hotS = enS && st.Hot == Hit.CStop;
@@ -1974,6 +2083,9 @@ namespace XyzRecorder
             else if (st.Rec == 2) Cavity(g, 1, Theme.Red, 0.22f, ox, oy, s);
             else if (hotR && !dnR) Cavity(g, 1, Theme.Red, 0.32f, ox, oy, s);
             if (hotS && !dnS) Cavity(g, 3, Color.FromArgb(150, 170, 185), 0.28f, ox, oy, s);
+            // v17: нажатие — мягкое затемнение под эмблемой (раньше — маска поверх букв: ступеньки и серый ободок)
+            if (dnR) Press(g, 1, 1f, ox, oy, s);
+            if (dnS) Press(g, 3, 1f, ox, oy, s);
             // v14: знаки «Запись»/«Стоп» видны всегда; под эмблемой — буквы закрывают всё, что вне полостей
             Marks(g, st, s, ox, oy, pulse, hotR, dnR, hotS, dnS);
             // эмблема 1:1; во время записи строка «BIM DESIGN» уступает место таймеру
@@ -1986,8 +2098,8 @@ namespace XyzRecorder
             if (st.Rec == 1) DrawS(g, 1, true, Theme.Red, (0.35f + 0.45f * pulse) * st.RecK, ox, oy);
             if (st.Rec == 2) { DrawS(g, 2, true, Theme.Amber, 0.55f + 0.35f * pulse, ox, oy); DrawS(g, 2, false, Theme.Amber, 0.62f + 0.2f * pulse, ox, oy); }
             if (hotP) { if (dnP) DrawS(g, 2, false, Color.Black, 0.42f, ox, oy); else { DrawS(g, 2, true, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 1.3f, ox, oy); DrawS(g, 2, false, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 0.22f, ox, oy); } }
-            if (hotR) { if (dnR) DrawS(g, 1, false, Color.Black, 0.45f, ox, oy); else DrawS(g, 1, true, Theme.Red, 0.7f, ox, oy); }
-            if (hotS) { if (dnS) DrawS(g, 3, false, Color.Black, 0.45f, ox, oy); else DrawS(g, 3, true, Theme.TealHi, 0.9f, ox, oy); }
+            if (hotR && !dnR) DrawS(g, 1, true, Theme.Red, 0.7f, ox, oy);
+            if (hotS && !dnS) DrawS(g, 3, true, Theme.TealHi, 0.9f, ox, oy);
             if (idleWave) MiniScope(g, s, mini, MYIdle, Theme.Teal, false, st.Power);   // v13
             // таймер и мини-осциллограф вместо «BIM DESIGN»
             if (st.Rec != 0)
@@ -2078,22 +2190,22 @@ namespace XyzRecorder
             else if (st.Rec == 2) { rb = 0.30f; rg = 0.10f; }
             else { rb = 0.55f; rg = 0.35f; }
             if (!hotR && st.Rec != 1) { rb *= pk; rg *= pk; }
-            Mark(g, 1, ox, oy, s, true, Theme.Mix(rcol, Color.Black, 1f - rb), rg);
+            Mark(g, 1, ox, oy, s, true, Theme.Mix(rcol, Color.Black, 1f - rb), rg, dnR ? 0.92f : 1f);
             float sb, sg; Color scol = StopC;
             if (dnS) { sb = 0.40f; sg = 0.08f; }
             else if (hotS) { sb = 1f; sg = 0.9f; scol = Color.FromArgb(240, 246, 248); }
             else { sb = 0.55f * pk; sg = 0.22f * pk; }
-            Mark(g, 3, ox, oy, s, false, Theme.Mix(scol, Color.Black, 1f - sb), sg);
+            Mark(g, 3, ox, oy, s, false, Theme.Mix(scol, Color.Black, 1f - sb), sg, dnS ? 0.92f : 1f);
         }
-        static void Mark(Graphics g, int code, int ox, int oy, float s, bool dot, Color col, float glow)
+        static void Mark(Graphics g, int code, int ox, int oy, float s, bool dot, Color col, float glow, float k)
         {
             var sh = shapes[code]; if (sh == null) return;
             int dil = Math.Max(1, (int)Math.Round(2 * s));
             float cav = Math.Min(sh.Box.Width, sh.Box.Height) - 2 * dil;   // размер самой полости (без расширения маски)
-            float d = cav * (dot ? 0.43f : 0.38f);
+            float d = cav * (dot ? 0.43f : 0.38f) * k;   // v17: k = 0,92 при нажатии — знак «вдавливается»
             var c = new PointF(sh.C.X - ox + 0.5f, sh.C.Y - oy + 0.5f);
             var r = new RectangleF(c.X - d / 2, c.Y - d / 2, d, d);
-            using (var p = dot ? new GraphicsPath() : Theme.Round(r, 2.2f * s))
+            using (var p = dot ? new GraphicsPath() : Theme.Round(r, 2.2f * s * k))
             {
                 if (dot) p.AddEllipse(r);
                 if (glow > 0.01f) Glow(g, p, col, s, glow);
@@ -2153,6 +2265,11 @@ namespace XyzRecorder
             sb.Append("; угол справа (зона) → " + CornerAt(s, new Point(Off(Plate.Right - X0 - 8, s), Off(Plate.Y - Y0 + 40, s))));
             sb.Append("; каска (зона) → " + CornerAt(s, new Point(Off(CX - X0, s), Off(50 - Y0, s))));
             sb.Append("; вне скругления → " + CornerAt(s, new Point(Off(Plate.X - X0 + 1, s), Off(Plate.Y - Y0 + 1, s))));
+            if (Bare)   // v17: зоны у каски и прозрачное место рядом
+            {
+                Func<float, float, string> zb = (x, y) => { var q = new Point(Off(x - X0, s), Off(y - Y0, s)); return CornerAt(s, q) + "/" + HitTest(s, q); };
+                sb.Append("; зона слева от каски → " + zb(50, 60) + "; зона справа от каски → " + zb(170, 60) + "; между буквами внизу → " + zb(CX, 200) + "; буква d (обвод) → " + zb(52, 140));
+            }
             return sb.ToString();
         }
     }
@@ -2488,7 +2605,7 @@ namespace XyzRecorder
     // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
     class AboutForm : Form
     {
-        public const string Version = "v16";
+        public const string Version = "v17";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -2743,7 +2860,34 @@ namespace XyzRecorder
             SavePos();
             if (!frame.Enabled) frame.Start();
         }
-        Hit HitAt(Point p) { return compact ? CompactView.HitTest(s, p) : DeviceView.HitTest(Lp(p)); }
+        Hit HitAt(Point p) { if (compact) CompactView.Bare = ui.SkinK >= 0.5f; return compact ? CompactView.HitTest(s, p) : DeviceView.HitTest(Lp(p)); }
+        // v17: компакт без плашки — курсор опрашивается каждый кадр: зоны у каски показывают кнопки «свернуть»/«закрыть»
+        // (сами зоны прозрачны и щелчков не ловят), а над тенью и прочими местами без кнопок и эмблемы окно получает
+        // WS_EX_TRANSPARENT — щелчок уходит в окно под ним, как у рамки области.
+        bool passThru;
+        void SetPassThrough(bool on)
+        {
+            if (on == passThru || !IsHandleCreated) return;
+            passThru = on;
+            int ex = Native.GetWindowLong(Handle, -20);
+            Native.SetWindowLong(Handle, -20, on ? ex | 0x20 : ex & ~0x20);
+        }
+        void PollBare()
+        {
+            if (!(compact && Visible && ui.SkinK >= 0.5f) || Capture || ui.Down != Hit.None) { if (!(compact && ui.SkinK >= 0.5f)) SetPassThrough(false); return; }
+            var p = PointToClient(Cursor.Position);
+            bool inside = p.X >= 0 && p.Y >= 0 && p.X < Width && p.Y < Height;
+            Hit h = Hit.None; int c = 0;
+            if (inside)
+            {
+                CompactView.Bare = true;
+                h = CompactView.HitTest(s, p); c = CompactView.CornerAt(s, p);
+                if (h == Hit.CMin) c = 1; else if (h == Hit.CClose) c = 2;
+            }
+            corner = c;
+            if (h == Hit.None && ui.Hot != Hit.None) { ui.Hot = Hit.None; Cursor = Cursors.Default; }
+            SetPassThrough(inside && h == Hit.None);
+        }
 
         // ---------- трей ----------
         void BuildTray()
@@ -2840,6 +2984,7 @@ namespace XyzRecorder
             // обычные сообщения гаснут сами через 7 с, предупреждения остаются
             if (!ui.StatusWarn && ui.Status.Length > 0 && state == St.Idle && !testing && (DateTime.Now - statusT).TotalSeconds > 7) ui.Status = "";
             ui.MicLive = live; ui.PeakDb = peakHold; ui.Clip = (DateTime.Now - clipT).TotalSeconds < 2.5;
+            PollBare();   // v17
             // v16: угловые кнопки компакта — плавное появление/исчезание ~150 мс
             {
                 float stp = (float)(dt / 0.15);
@@ -3829,7 +3974,7 @@ namespace XyzRecorder
         static int Snapshot11(string which)
         {
             SnapshotMode = true; Settings.ReadOnly = true;
-            string dir = Path.Combine(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test"), "snap11");
+            string dir = Path.Combine(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test"), "snap17");
             Directory.CreateDirectory(dir);
             string logf = Path.Combine(dir, "snapshot_v11_" + which + ".log");
             var log = new StringBuilder("snapshot v11 " + which + " " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + ", DPI k=" + Theme.K + "\r\n");
@@ -3867,9 +4012,29 @@ namespace XyzRecorder
                             Save(f.Snap(1, 1f, 1f, Hit.CPause, Hit.None, 0.5f, "", false, 11.5), dir, "c_hover_pause" + suf + ".png");
                             Save(f.Snap(1, 1f, 1f, Hit.CStop, Hit.None, 0.5f, "", false, 11.5), dir, "c_hover_stop" + suf + ".png");
                             Save(f.Snap(1, 1f, 1f, Hit.CStop, Hit.CStop, 0.5f, "", false, 11.5), dir, "c_down_stop" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.CPause, Hit.CPause, 0.5f, "", false, 11.5), dir, "c_down_pause" + suf + ".png");   // v17
                             Save(f.Snap(2, 1f, 1f, Hit.CPause, Hit.None, 0.12f, "", false, 12.8125), dir, "c_hover_pause_paused" + suf + ".png");
                             Save(f.SnapProc(0.42f, 14.0), dir, "c_saving" + suf + ".png");
                             Save(f.SnapMask(), dir, "c_mask" + suf + ".png");
+                            // v17: облик «Рамка» — компакт без плашки (кадры с прозрачностью, фон подкладывается при склейке)
+                            f.SnapSkin(1f, 0f);
+                            Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "b_idle" + suf + ".png");
+                            Save(f.Snap(0, 1f, 1f, Hit.CRec, Hit.None, 0.28f, "", false, 10.0), dir, "b_hover_rec" + suf + ".png");
+                            Save(f.Snap(0, 1f, 1f, Hit.CRec, Hit.CRec, 0.28f, "", false, 10.0), dir, "b_down_rec" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.CStop, Hit.None, 0.5f, "", false, 11.5), dir, "b_hover_stop" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.CStop, Hit.CStop, 0.5f, "", false, 11.5), dir, "b_down_stop" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.5f, "", false, 12.8125), dir, "b_rec" + suf + ".png");
+                            Save(f.Snap(2, 1f, 1f, Hit.None, Hit.None, 0.12f, "", false, 12.8125), dir, "b_paused" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.CPause, Hit.None, 0.5f, "", false, 11.5), dir, "b_hover_pause" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.CPause, Hit.CPause, 0.5f, "", false, 11.5), dir, "b_down_pause" + suf + ".png");
+                            f.SnapCorner(1f, 0f); Save(f.Snap(0, 1f, 1f, Hit.CMin, Hit.None, 0.28f, "", false, 10.0), dir, "b_corner_min" + suf + ".png");
+                            f.SnapCorner(0f, 1f); Save(f.Snap(0, 1f, 1f, Hit.CClose, Hit.None, 0.28f, "", false, 10.0), dir, "b_corner_close" + suf + ".png");
+                            f.SnapCorner(1f, 0f); Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "b_corner_zone_min" + suf + ".png");
+                            f.SnapCorner(0f, 0f);
+                            Save(f.SnapMask(), dir, "b_mask" + suf + ".png");
+                            log.AppendLine("  без плашки, хит-тест: " + CompactView.Report(sc));
+                            f.SnapSkin(0f, 1f);
+                            CompactView.Bare = false;
                         }
                         f.SnapCompact(false); f.SetScale(1f);
                         Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "full_idle.png");
