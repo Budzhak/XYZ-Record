@@ -1,4 +1,6 @@
-﻿// XYZ Запись v11 (01.11.2026): компактный режим (плашка с эмблемой db, Запись — полость «d», Пауза — палочки «d»+«b», Стоп — полость «b»,
+﻿// XYZ Запись v12 (01.11.2026): компактный режим — под буквами «db» мини-осциллограф (тот же источник сэмплов и свечение, что у большого;
+// в покое при включённом питании и контроле входа — вместо «BIM DESIGN», в записи/паузе — под таймером вместо полоски уровня; пауза — янтарный).
+// XYZ Запись v11 (01.11.2026): компактный режим (плашка с эмблемой db, Запись — полость «d», Пауза — палочки «d»+«b», Стоп — полость «b»,
 // хит-тест по маске из PNG эмблемы; ini compact=1; двойной щелчок по эмблеме / меню «Компактный режим»), «Выбрать область…» (затемнение
 // на весь виртуальный экран, чётные размеры, ini region=x,y,w,h; во время записи — рамка 2 px снаружи области, исключена из захвата),
 // «О программе…», исходники до «Улучшить голос» — в %LOCALAPPDATA%\XYZ\raw (старше 7 дней удаляются при запуске, меню «Открыть исходники»).
@@ -865,6 +867,8 @@ namespace XyzRecorder
         PointF[] cur; bool live;
         Brush[] glowBr; Brush coreBr;
         public float Gain = 4.2f;
+        public float Pad = 6f;          // v12: поле по вертикали (мини-осциллограф — меньше)
+        public float GlowK = 1f;        // v12: толщина свечения (мини-осциллограф — тоньше)
 
         public void Ensure(int w, int h, float sc)
         {
@@ -932,7 +936,7 @@ namespace XyzRecorder
         {
             if (trail == null) return;
             live = isLive;
-            float pad = 6 * s;
+            float pad = Pad * s;
             cur = Points(buf, isLive ? avail : 0, W, H, pad, Gain);
             using (var g = Graphics.FromImage(tmp))
             {
@@ -942,7 +946,7 @@ namespace XyzRecorder
                 using (var ia = Res.Attr(1, 1, 1, 0.64f))
                     g.DrawImage(trail, new Rectangle(0, 0, W, H), 0, 0, W, H, GraphicsUnit.Pixel, ia);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (var pen = new Pen(Theme.A(Theme.Teal, 0.55f), 1.5f * s) { LineJoin = LineJoin.Round })
+                using (var pen = new Pen(Theme.A(Theme.Teal, 0.55f), (GlowK < 1f ? 1.1f : 1.5f) * s) { LineJoin = LineJoin.Round })
                     g.DrawLines(pen, cur);
             }
             var t = trail; trail = tmp; tmp = t;
@@ -961,7 +965,7 @@ namespace XyzRecorder
             var st = g.Save();
             g.TranslateTransform((float)Math.Round(x), (float)Math.Round(y));
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            float[] wd = { 10f, 5.5f, 2.8f }; float[] ga = { 0.06f, 0.13f, 0.32f };
+            float[] wd = { 10f * GlowK, 5.5f * GlowK, 2.8f * GlowK }; float[] ga = { 0.06f, 0.13f, 0.32f };
             for (int i = 0; i < 3; i++)
             {
                 Pen pen = power >= 0.99f ? new Pen(glowBr[i], wd[i] * s) : new Pen(Theme.A(Theme.Teal, ga[i] * power), wd[i] * s);
@@ -970,6 +974,28 @@ namespace XyzRecorder
             }
             using (var pen = power >= 0.99f ? new Pen(coreBr, 1.35f * s) : new Pen(Theme.A(Theme.Mix(Theme.Teal, Color.White, 0.35f), power), 1.35f * s))
             { pen.LineJoin = LineJoin.Round; g.DrawLines(pen, cur); }
+            g.Restore(st);
+        }
+        // v12: та же волна одним цветом (пауза — янтарный приглушённый): след и свечение без градиента.
+        public void DrawTint(Graphics g, float x, float y, Color c, float k)
+        {
+            if (trail == null || cur == null || k <= 0.01f) return;
+            // след бирюзовый: яркость берём из зелёного канала и перекрашиваем в c
+            var cm = new ColorMatrix(new float[][] {
+                new float[] { 0, 0, 0, 0, 0 }, new float[] { c.R / 255f, c.G / 255f, c.B / 255f, 0, 0 }, new float[] { 0, 0, 0, 0, 0 },
+                new float[] { 0, 0, 0, 0.5f * k, 0 }, new float[] { 0, 0, 0, 0, 1 } });
+            using (var ia = new ImageAttributes())
+            {
+                ia.SetColorMatrix(cm);
+                g.DrawImage(trail, new Rectangle((int)Math.Round(x), (int)Math.Round(y), W, H), 0, 0, W, H, GraphicsUnit.Pixel, ia);
+            }
+            var st = g.Save();
+            g.TranslateTransform((float)Math.Round(x), (float)Math.Round(y));
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float[] wd = { 10f * GlowK, 5.5f * GlowK, 2.8f * GlowK }; float[] ga = { 0.06f, 0.13f, 0.32f };
+            for (int i = 0; i < 3; i++)
+                using (var pen = new Pen(Theme.A(c, ga[i] * k), wd[i] * s) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round }) g.DrawLines(pen, cur);
+            using (var pen = new Pen(Theme.A(Theme.Mix(c, Color.White, 0.25f), k), 1.35f * s) { LineJoin = LineJoin.Round }) g.DrawLines(pen, cur);
             g.Restore(st);
         }
     }
@@ -1435,6 +1461,9 @@ namespace XyzRecorder
         public static readonly RectangleF TextBand = new RectangleF(40, 171, 152, 15);  // строка «BIM DESIGN» эмблемы (холст)
         public static readonly RectangleF EmbLp = new RectangleF(26, 17, 143, 147);     // эмблема в координатах корпуса (двойной щелчок)
         public const float CX = 115.5f;                                                 // середина букв по X (холст)
+        // v12: мини-осциллограф (холст): ширина ~ как «BIM DESIGN» с запасом (≈58% плашки), высота 15 px @1x;
+        // в покое — на месте «BIM DESIGN» (буквы кончаются на y=169), в записи — под таймером (низ плашки 204).
+        public const float MW = 104, MH = 15, MYIdle = 172, MYRec = 186;
 
         class Shape { public Bitmap Fill, Glow; public Rectangle Box; public Point GlowOff; public PointF C; }
         static float ms = -1f; static byte[] map; static int mw, mh;
@@ -1622,7 +1651,8 @@ namespace XyzRecorder
             for (int i = 0; i < 3; i++) using (var pen = new Pen(Theme.A(c, a[i] * k), w[i] * s) { LineJoin = LineJoin.Round }) g.DrawPath(pen, p);
         }
 
-        public static void Render(Graphics g, float s, UiState st)
+        public static void Render(Graphics g, float s, UiState st) { Render(g, s, st, null); }
+        public static void Render(Graphics g, float s, UiState st, Scope mini)
         {
             Ensure(s);
             g.CompositingMode = CompositingMode.SourceCopy; g.Clear(Color.Transparent); g.CompositingMode = CompositingMode.SourceOver;
@@ -1658,7 +1688,9 @@ namespace XyzRecorder
             if (hotS && !dnS) Cavity(g, 3, Color.FromArgb(150, 170, 185), 0.28f, ox, oy, s);
             // эмблема 1:1; во время записи строка «BIM DESIGN» уступает место таймеру
             var band = new RectangleF((TextBand.X - X0) * s, (TextBand.Y - Y0) * s, TextBand.Width * s, TextBand.Height * s);
-            if (st.Rec != 0) g.SetClip(band, CombineMode.Exclude);
+            // v12: в покое при включённом питании и контроле входа «BIM DESIGN» уступает место мини-осциллографу
+            bool idleWave = mini != null && st.Rec == 0 && st.Power > 0.5f && st.MicLive;
+            if (st.Rec != 0 || idleWave) g.SetClip(band, CombineMode.Exclude);
             Res.Draw(g, Res.Get("emblem", s), -ox, -oy, 1f);
             g.ResetClip();
             // над эмблемой: свечение, нажатие, подсказки
@@ -1667,10 +1699,11 @@ namespace XyzRecorder
             if (hotP) { if (dnP) DrawS(g, 2, false, Color.Black, 0.42f, ox, oy); else { DrawS(g, 2, true, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 1.3f, ox, oy); DrawS(g, 2, false, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 0.22f, ox, oy); } }
             if (hotR) { if (dnR) DrawS(g, 1, false, Color.Black, 0.45f, ox, oy); else { DrawS(g, 1, true, Theme.Red, 0.7f, ox, oy); Hint(g, 1, ox, oy, s, true); } }
             if (hotS) { if (dnS) DrawS(g, 3, false, Color.Black, 0.45f, ox, oy); else { DrawS(g, 3, true, Theme.TealHi, 0.9f, ox, oy); Hint(g, 3, ox, oy, s, false); } }
-            // таймер и уровень звука вместо «BIM DESIGN»
+            if (idleWave) MiniScope(g, s, mini, MYIdle, Theme.Teal, false, st.Power);
+            // таймер и мини-осциллограф вместо «BIM DESIGN»
             if (st.Rec != 0)
             {
-                float cx = (CX - X0) * s, cy = (181f - Y0) * s;
+                float cx = (CX - X0) * s, cy = ((st.Rec == 3 ? 181f : 178.5f) - Y0) * s;
                 Color tc = st.Rec == 1 ? Theme.Mix(Theme.Teal, Theme.Red, st.RecK) : st.Rec == 2 ? Theme.Amber : Theme.Teal;
                 if (st.Rec == 3)
                 {
@@ -1685,27 +1718,29 @@ namespace XyzRecorder
                     using (var path = new GraphicsPath())
                     using (var sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     {
-                        path.AddString(st.Timer, Theme.DigitFam, (int)FontStyle.Regular, 16f * s, new RectangleF(cx - 90 * s, cy - 14 * s, 180 * s, 28 * s), sf);
-                        Glow(g, path, tc, s, 0.8f * ta);
+                        path.AddString(st.Timer, Theme.DigitFam, (int)FontStyle.Regular, 15f * s, new RectangleF(cx - 90 * s, cy - 14 * s, 180 * s, 28 * s), sf);
+                        Glow(g, path, tc, s, 0.55f * ta);
                         using (var b = new SolidBrush(Theme.A(Theme.Mix(tc, Color.White, 0.15f), ta))) g.FillPath(b, path);
                     }
                 }
-                if (st.Rec == 1 || st.Rec == 2)
-                {
-                    var lr = new RectangleF(cx - 40 * s, (193f - Y0) * s, 80 * s, 3 * s);
-                    using (var p = Theme.Round(lr, 1.5f * s)) using (var b = new SolidBrush(Theme.A(Theme.Teal, 0.16f))) g.FillPath(b, p);
-                    float lv = st.Rec == 1 && st.MicLive ? Math.Max(0f, Math.Min(1f, (st.PeakDb + 50f) / 50f)) : 0f;
-                    if (lv > 0.01f)
-                    {
-                        var fr = new RectangleF(lr.X, lr.Y, Math.Max(3 * s, lr.Width * lv), lr.Height);
-                        using (var p = Theme.Round(fr, 1.5f * s))
-                        {
-                            Glow(g, p, Theme.Teal, s, 0.7f);
-                            using (var b = new SolidBrush(Theme.Mix(Theme.Teal, Color.White, 0.15f))) g.FillPath(b, p);
-                        }
-                    }
-                }
+                if ((st.Rec == 1 || st.Rec == 2) && mini != null)
+                    MiniScope(g, s, mini, MYRec, st.Rec == 2 ? Theme.Amber : Theme.Teal, st.Rec == 2, 1f);
             }
+        }
+        // v12: мини-осциллограф — полоса без рамки, всё обрезано по полосе (буквы и таймер не задевает);
+        // тонкая центральная линия видна всегда (при тишине — только она).
+        static void MiniScope(Graphics g, float s, Scope mini, float y0, Color c, bool dim, float power)
+        {
+            float x = (CX - MW / 2 - X0) * s, y = (y0 - Y0) * s;
+            var r = new RectangleF(x, y, (float)Math.Round(MW * s), (float)Math.Round(MH * s));
+            var gs = g.Save();
+            g.SetClip(r);
+            float mid = y + (float)Math.Round(MH * s) / 2f;
+            using (var pen = new Pen(Theme.A(c, (dim ? 0.18f : 0.22f) * power), Math.Max(1f, 0.8f * s)))
+                g.DrawLine(pen, x + 1 * s, mid, x + r.Width - 1 * s, mid);
+            if (dim) mini.DrawTint(g, x, y, Theme.Mix(Theme.Amber, Color.Black, 0.18f), 0.62f);
+            else mini.Draw(g, x, y, power);
+            g.Restore(gs);
         }
         // подсказки: красная точка в «d» (Запись), квадрат в «b» (Стоп)
         static void Hint(Graphics g, int code, int ox, int oy, float s, bool dot)
@@ -2089,7 +2124,7 @@ namespace XyzRecorder
     // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
     class AboutForm : Form
     {
-        public const string Version = "v11";
+        public const string Version = "v12";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -2217,6 +2252,7 @@ namespace XyzRecorder
         float s;
         UiState ui = new UiState();
         Scope scope = new Scope();
+        Scope mini = new Scope { Pad = 1.5f, GlowK = 0.5f, Gain = 3.2f };   // v12: мини-осциллограф компактного режима
         MicMeter mm = new MicMeter();
         float[] sbuf = new float[2048];
         List<AreaItem> areas = new List<AreaItem>(); AreaItem area;
@@ -2314,6 +2350,7 @@ namespace XyzRecorder
         {
             if (compact) EnsureFrame((int)Math.Round(CompactView.W * s), (int)Math.Round(CompactView.H * s));
             else EnsureFrame((int)Math.Round(Lay.CW * s), (int)Math.Round(Lay.CH * s));
+            mini.Ensure((int)Math.Round(CompactView.MW * s), (int)Math.Round(CompactView.MH * s), s);   // v12
         }
         // Эмблема остаётся на месте: окно сдвигается на начало вырезки холста.
         void SetCompact(bool on)
@@ -2427,6 +2464,7 @@ namespace XyzRecorder
             if (Visible && Alpha > 0)
             {
                 scope.Push(sbuf, avail, live && powered);
+                if (compact) mini.Push(sbuf, avail, live && powered);   // v12: тот же источник, та же частота кадров
                 RenderMain();
                 Present();
             }
@@ -2439,7 +2477,7 @@ namespace XyzRecorder
             ui.Mic = mic != null ? ShortMic(mic.Name) : "Микрофон";
             ui.MicOn = micOn && mics.Count > 0;
             ui.Area = area != null ? (area.Short ?? area.Text) : "Весь экран";
-            using (var g = Graphics.FromImage(Frame)) { if (compact) CompactView.Render(g, s, ui); else DeviceView.Render(g, s, ui, scope); }
+            using (var g = Graphics.FromImage(Frame)) { if (compact) CompactView.Render(g, s, ui, mini); else DeviceView.Render(g, s, ui, scope); }
         }
 
         // «Микрофон (Realtek High Definition Audio)» → «Realtek High Definition Audio» (значок микрофона уже есть)
@@ -3204,6 +3242,7 @@ namespace XyzRecorder
             {
                 Synth.Fill(buf, t - 0.033 * (7 - i), amp);
                 scope.Push(buf, amp > 0 ? buf.Length : 0, amp > 0 && power > 0.5f);
+                mini.Push(buf, amp > 0 ? buf.Length : 0, amp > 0 && power > 0.5f);
             }
             RenderMain();
             Log += string.Format("frame st={0} lever={1:0.00}: {2} ms\r\n", st, lever, sw2.ElapsedMilliseconds / 8.0);
@@ -3371,6 +3410,8 @@ namespace XyzRecorder
                             string suf = sc == 1f ? "" : sc == 2f ? "@2x" : "@125";
                             f.SnapRecK = 1f;
                             Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "c_idle" + suf + ".png");
+                            Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0f, "", false, 10.0), dir, "c_idle_silence" + suf + ".png");   // v12
+                            Save(f.Snap(0, 0f, 0f, Hit.None, Hit.None, 0f, "", false, 10.0), dir, "c_off" + suf + ".png");             // v12
                             Save(f.Snap(0, 1f, 1f, Hit.CRec, Hit.None, 0.28f, "", false, 10.0), dir, "c_hover_rec" + suf + ".png");
                             Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.5f, "", false, 12.8125), dir, "c_rec" + suf + ".png");
                             Save(f.Snap(2, 1f, 1f, Hit.None, Hit.None, 0.12f, "", false, 12.8125), dir, "c_paused" + suf + ".png");
