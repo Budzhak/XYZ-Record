@@ -1,4 +1,5 @@
-﻿// XYZ Запись v17 (01.11.2026): компакт в облике «Рамка» — без плашки и обводки: на прозрачном фоне только эмблема (каска, «db»),
+﻿// XYZ Запись v18 (01.11.2026): новый значок приложения — виниловая пластинка (xyz_rec_vinyl.ico: /win32icon и ресурс app.ico — окно, трей). Код как в v17.
+// XYZ Запись v17 (01.11.2026): компакт в облике «Рамка» — без плашки и обводки: на прозрачном фоне только эмблема (каска, «db»),
 // мини-осциллограф и таймер; вокруг — мягкая тёмная тень (~35%) для читаемости на светлом фоне; полости «d»/«b» залиты тёмным (это кнопки).
 // Хит-тест: кнопки по маске, перетаскивание — за непрозрачные пиксели эмблемы; тень и прозрачные места пропускают щелчки
 // (WS_EX_TRANSPARENT по положению курсора). Кнопки «свернуть»/«закрыть» — при наведении слева и справа от каски. Рамку записи
@@ -2605,7 +2606,7 @@ namespace XyzRecorder
     // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
     class AboutForm : Form
     {
-        public const string Version = "v17";
+        public const string Version = "v18";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -3974,7 +3975,7 @@ namespace XyzRecorder
         static int Snapshot11(string which)
         {
             SnapshotMode = true; Settings.ReadOnly = true;
-            string dir = Path.Combine(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test"), "snap17");
+            string dir = Path.Combine(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test"), "snap18");
             Directory.CreateDirectory(dir);
             string logf = Path.Combine(dir, "snapshot_v11_" + which + ".log");
             var log = new StringBuilder("snapshot v11 " + which + " " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + ", DPI k=" + Theme.K + "\r\n");
