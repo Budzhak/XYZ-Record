@@ -1,4 +1,9 @@
-﻿// XYZ Запись v10 (01.11.2026): портабельная версия — ffmpeg ищется рядом с exe, в подпапке ffmpeg\, затем Shotcut, затем PATH.
+﻿// XYZ Запись v11 (01.11.2026): компактный режим (плашка с эмблемой db, Запись — полость «d», Пауза — палочки «d»+«b», Стоп — полость «b»,
+// хит-тест по маске из PNG эмблемы; ini compact=1; двойной щелчок по эмблеме / меню «Компактный режим»), «Выбрать область…» (затемнение
+// на весь виртуальный экран, чётные размеры, ini region=x,y,w,h; во время записи — рамка 2 px снаружи области, исключена из захвата),
+// «О программе…», исходники до «Улучшить голос» — в %LOCALAPPDATA%\XYZ\raw (старше 7 дней удаляются при запуске, меню «Открыть исходники»).
+// Ключи проверки v11: --snapshot-compact, --snapshot-about, --snapshot-region (test\snap11\*.png), --regiontest x,y,w,h (запись области 2 с).
+// XYZ Запись v10 (01.11.2026): портабельная версия — ffmpeg ищется рядом с exe, в подпапке ffmpeg\, затем Shotcut, затем PATH.
 // XYZ Запись v8 — «прибор»: форма «Шасси» (башня с эмблемой db + корпус со скошенным углом), современный стиль.
 // Окно — layered (WS_EX_LAYERED + UpdateLayeredWindow, 32bpp PARGB): статичные слои — PNG из ресурсов (@1x/@2x),
 // динамика (осциллограф, таймер, подсветка пэдов, тумблер) рисуется GDI+ поверх, ~30 кадров/с.
@@ -408,13 +413,26 @@ namespace XyzRecorder
             return ok;
         }
 
-        // Обработанный tmp готов: оригинал → <папка>\_raw\<имя>_raw.mp4, tmp → на место итогового файла.
+        // v11: исходники до «Улучшить голос» — %LOCALAPPDATA%\XYZ\raw; файлы старше 7 дней удаляются при запуске (CleanRaw).
+        public static string RawDir { get { return Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "XYZ"), "raw"); } }
+        public static void CleanRaw(int days)
+        {
+            try
+            {
+                if (!Directory.Exists(RawDir)) return;
+                var lim = DateTime.Now.AddDays(-days);
+                foreach (var f in Directory.GetFiles(RawDir))
+                    try { if (File.GetLastWriteTime(f) < lim) File.Delete(f); } catch { }
+            }
+            catch { }
+        }
+        // Обработанный tmp готов: оригинал → RawDir\<имя>_raw.mp4, tmp → на место итогового файла.
         public static bool SwapEnhanced(string outFile, string tmp, out string rawFile, out string err)
         {
             rawFile = null; err = null;
             try
             {
-                string rawDir = Path.Combine(Path.GetDirectoryName(outFile), "_raw");
+                string rawDir = RawDir;   // v11: не рядом с записями, а в %LOCALAPPDATA%\XYZ\raw
                 Directory.CreateDirectory(rawDir);
                 string b = Path.GetFileNameWithoutExtension(outFile);
                 string rf = Path.Combine(rawDir, b + "_raw.mp4");
@@ -537,8 +555,9 @@ namespace XyzRecorder
     }
     class AreaItem
     {
-        public int Kind; // 0 весь экран, 1 монитор, 2 окно
+        public int Kind; // 0 весь экран, 1 монитор, 2 окно, 3 выбранная область (v11)
         public int Mon; public IntPtr Hwnd; public string Text; public string Key;
+        public Rectangle Rect; public string Short;   // v11: для области
         public override string ToString() { return Text; }
     }
 
@@ -794,7 +813,7 @@ namespace XyzRecorder
         public static readonly PointF QPause = new PointF(244, 28), QStop = new PointF(280, 28); public const float QR = 15;
     }
 
-    enum Hit { None = 0, Sel1, Sel2, Test, Folder, Min, Close, PadRec, PadPause, PadStop, Toggle, Screen, Body, QPause, QStop, Skin }
+    enum Hit { None = 0, Sel1, Sel2, Test, Folder, Min, Close, PadRec, PadPause, PadStop, Toggle, Screen, Body, QPause, QStop, Skin, CRec, CPause, CStop }
 
     class UiState
     {
@@ -1403,6 +1422,342 @@ namespace XyzRecorder
         }
     }
 
+    // ---------- v11: компактный режим — плашка с эмблемой db, кнопки внутри букв ----------
+    // Полости и палочки ищутся по PNG эмблемы (альфа + цвет): буквы — мятные непрозрачные пиксели (A>160, R>150),
+    // полости — фон, не связанный с краем картинки (заливка от краёв), палочки — вертикальные штрихи в строке у верха букв.
+    // Хит-тест — по маске (байт на пиксель холста): 1 — Запись (полость «d»), 2 — Пауза (палочки «d» и «b»), 3 — Стоп (полость «b»).
+    // Геометрия эмблемы не меняется: PNG рисуется 1:1, подсветка — отдельными слоями под/над ним.
+    static class CompactView
+    {
+        // окно компактного режима — часть холста полного прибора (логические px холста, с полем Lay.P)
+        public const float X0 = 14, Y0 = 10, W = 204, H = 206;
+        public static readonly RectangleF Plate = new RectangleF(26, 22, 180, 182);    // плашка (холст)
+        public static readonly RectangleF TextBand = new RectangleF(40, 171, 152, 15);  // строка «BIM DESIGN» эмблемы (холст)
+        public static readonly RectangleF EmbLp = new RectangleF(26, 17, 143, 147);     // эмблема в координатах корпуса (двойной щелчок)
+        public const float CX = 115.5f;                                                 // середина букв по X (холст)
+
+        class Shape { public Bitmap Fill, Glow; public Rectangle Box; public Point GlowOff; public PointF C; }
+        static float ms = -1f; static byte[] map; static int mw, mh;
+        static Shape[] shapes = new Shape[4];
+        static PointF[] stemC = new PointF[2];
+        public static string Info = "";
+
+        public static int Off(float v, float s) { return (int)Math.Round(v * s); }
+
+        static void Ensure(float s)
+        {
+            if (Math.Abs(ms - s) < 0.0001f) return;
+            ms = s; map = null; Info = "";
+            for (int i = 0; i < 4; i++) if (shapes[i] != null) { shapes[i].Fill.Dispose(); shapes[i].Glow.Dispose(); shapes[i] = null; }
+            var em = Res.Get("emblem", s); if (em == null) { Info = "нет emblem"; return; }
+            int w = em.Width, h = em.Height, n = w * h; mw = w; mh = h;
+            var px = new int[n];
+            var bd = em.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            for (int y = 0; y < h; y++) Marshal.Copy(bd.Scan0 + y * bd.Stride, px, y * w, w);
+            em.UnlockBits(bd);
+            var L = new bool[n]; int x0 = w, y0 = h, x1 = -1, y1 = -1;
+            for (int i = 0; i < n; i++)
+            {
+                int a = (px[i] >> 24) & 255, r = (px[i] >> 16) & 255;
+                if (a > 160 && r > 150) { L[i] = true; int x = i % w, y = i / w; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+            }
+            if (x1 < 0) { Info = "буквы не найдены"; return; }
+            // фон снаружи букв — заливка от краёв картинки; остальное (не буква) внутри — полости
+            var lab = new int[n]; var st = new Stack<int>();
+            for (int x = 0; x < w; x++) { Flood(x, L, lab, w, h, -1, st, null); Flood((h - 1) * w + x, L, lab, w, h, -1, st, null); }
+            for (int y = 0; y < h; y++) { Flood(y * w, L, lab, w, h, -1, st, null); Flood(y * w + w - 1, L, lab, w, h, -1, st, null); }
+            var holes = new List<List<int>>(); int id = 0;
+            int minPix = Math.Max(20, (x1 - x0) * (y1 - y0) / 100);
+            for (int y = y0; y <= y1; y++)
+                for (int x = x0; x <= x1; x++)
+                {
+                    int i = y * w + x; if (L[i] || lab[i] != 0) continue;
+                    var pix = new List<int>(); Flood(i, L, lab, w, h, ++id, st, pix);
+                    if (pix.Count >= minPix) holes.Add(pix);
+                }
+            if (holes.Count < 2) { Info = "полостей найдено " + holes.Count; return; }
+            holes.Sort((p, q) => q.Count.CompareTo(p.Count));
+            holes = holes.GetRange(0, 2);
+            holes.Sort((p, q) => (p[0] % w).CompareTo(q[0] % w));   // слева — «d», справа — «b»
+            // палочки: строка на 12% высоты букв сверху пересекает только вертикальные штрихи
+            int yr = y0 + (int)(0.12f * (y1 - y0));
+            var runs = new List<int[]>();
+            for (int x = x0; x <= x1; x++)
+            {
+                if (!L[yr * w + x]) continue;
+                int xs = x; while (x + 1 <= x1 && L[yr * w + x + 1]) x++;
+                runs.Add(new[] { xs, x });
+            }
+            runs.Sort((p, q) => (q[1] - q[0]).CompareTo(p[1] - p[0]));
+            if (runs.Count < 2) { Info = "палочек найдено " + runs.Count; return; }
+            runs = runs.GetRange(0, 2); runs.Sort((p, q) => p[0].CompareTo(q[0]));
+            map = new byte[n];
+            var stemA = new byte[n]; int sx0 = w, sx1 = 0;
+            for (int k = 0; k < 2; k++)
+            {
+                int a0 = runs[k][0] - 1, a1 = runs[k][1] + 1; double sy = 0; int cnt = 0;
+                for (int y = Math.Max(0, y0 - 2); y <= Math.Min(h - 1, y1 + 2); y++)
+                    for (int x = Math.Max(0, a0); x <= Math.Min(w - 1, a1); x++)
+                    {
+                        int i = y * w + x; int a = (px[i] >> 24) & 255, r = (px[i] >> 16) & 255;
+                        if (L[i]) { map[i] = 2; sy += y; cnt++; }
+                        if (r > 110 && a > 8) stemA[i] = (byte)a;
+                    }
+                stemC[k] = new PointF((runs[k][0] + runs[k][1]) / 2f, cnt > 0 ? (float)(sy / cnt) : (y0 + y1) / 2f);
+                sx0 = Math.Min(sx0, a0); sx1 = Math.Max(sx1, a1);
+            }
+            int dil = Math.Max(1, (int)Math.Round(2 * s));
+            var info = new StringBuilder();
+            info.AppendFormat("буквы {0},{1}-{2},{3}; палочки x {4}-{5} и {6}-{7}", x0, y0, x1, y1, runs[0][0], runs[0][1], runs[1][0], runs[1][1]);
+            for (int k = 0; k < 2; k++)
+            {
+                var pix = holes[k]; byte code = (byte)(k == 0 ? 1 : 3);
+                int hx0 = w, hy0 = h, hx1 = 0, hy1 = 0; double cx = 0, cy = 0;
+                foreach (int i in pix) { int x = i % w, y = i / w; hx0 = Math.Min(hx0, x); hx1 = Math.Max(hx1, x); hy0 = Math.Min(hy0, y); hy1 = Math.Max(hy1, y); cx += x; cy += y; }
+                var fill = new byte[n];
+                foreach (int i in pix)
+                {
+                    int x = i % w, y = i / w;
+                    for (int dy = -dil; dy <= dil; dy++)
+                        for (int dx = -dil; dx <= dil; dx++)
+                        {
+                            int xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                            int j = yy * w + xx; fill[j] = 255; if (map[j] == 0) map[j] = code;
+                        }
+                }
+                var box = Rectangle.FromLTRB(Math.Max(0, hx0 - dil), Math.Max(0, hy0 - dil), Math.Min(w, hx1 + dil + 1), Math.Min(h, hy1 + dil + 1));
+                shapes[code] = MakeShape(fill, w, box, s);
+                shapes[code].C = new PointF((float)(cx / pix.Count), (float)(cy / pix.Count));
+                info.AppendFormat("; полость {0} {1},{2}-{3},{4} ({5} px)", k == 0 ? "d" : "b", hx0, hy0, hx1, hy1, pix.Count);
+            }
+            shapes[2] = MakeShape(stemA, w, Rectangle.FromLTRB(Math.Max(0, sx0), Math.Max(0, y0 - 2), Math.Min(w, sx1 + 1), Math.Min(h, y1 + 3)), s);
+            Info = info.ToString();
+        }
+
+        static void Flood(int start, bool[] L, int[] lab, int w, int h, int id, Stack<int> st, List<int> pix)
+        {
+            if (L[start] || lab[start] != 0) return;
+            lab[start] = id; st.Push(start);
+            while (st.Count > 0)
+            {
+                int i = st.Pop(); if (pix != null) pix.Add(i);
+                int x = i % w, y = i / w;
+                if (x > 0 && !L[i - 1] && lab[i - 1] == 0) { lab[i - 1] = id; st.Push(i - 1); }
+                if (x < w - 1 && !L[i + 1] && lab[i + 1] == 0) { lab[i + 1] = id; st.Push(i + 1); }
+                if (y > 0 && !L[i - w] && lab[i - w] == 0) { lab[i - w] = id; st.Push(i - w); }
+                if (y < h - 1 && !L[i + w] && lab[i + w] == 0) { lab[i + w] = id; st.Push(i + w); }
+            }
+        }
+
+        // Слой формы: белый с альфой маски + размытое свечение (уменьшение/увеличение ×4 дважды).
+        static Shape MakeShape(byte[] am, int w, Rectangle box, float s)
+        {
+            var sh = new Shape { Box = box };
+            int bw = Math.Max(1, box.Width), bh = Math.Max(1, box.Height);
+            var data = new int[bw * bh];
+            for (int y = 0; y < bh; y++) for (int x = 0; x < bw; x++) data[y * bw + x] = (am[(box.Y + y) * w + box.X + x] << 24) | 0xFFFFFF;
+            var fb = new Bitmap(bw, bh, PixelFormat.Format32bppArgb);
+            var d = fb.LockBits(new Rectangle(0, 0, bw, bh), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            for (int y = 0; y < bh; y++) Marshal.Copy(data, y * bw, d.Scan0 + y * d.Stride, bw);
+            fb.UnlockBits(d);
+            sh.Fill = fb;
+            int pad = (int)Math.Ceiling(10 * s), gw = bw + 2 * pad, gh = bh + 2 * pad;
+            var gb = new Bitmap(gw, gh, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(gb)) { g.Clear(Color.Transparent); g.DrawImage(fb, new Rectangle(pad, pad, bw, bh), 0, 0, bw, bh, GraphicsUnit.Pixel); }
+            for (int k = 0; k < 2; k++)
+            {
+                int sw = Math.Max(1, gw / 4), shh = Math.Max(1, gh / 4);
+                using (var small = new Bitmap(sw, shh, PixelFormat.Format32bppPArgb))
+                using (var ia = new ImageAttributes())
+                {
+                    ia.SetWrapMode(WrapMode.TileFlipXY);
+                    using (var g = Graphics.FromImage(small)) { g.InterpolationMode = InterpolationMode.HighQualityBilinear; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.DrawImage(gb, new Rectangle(0, 0, sw, shh), 0, 0, gw, gh, GraphicsUnit.Pixel, ia); }
+                    using (var g = Graphics.FromImage(gb)) { g.CompositingMode = CompositingMode.SourceCopy; g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.DrawImage(small, new Rectangle(0, 0, gw, gh), 0, 0, sw, shh, GraphicsUnit.Pixel, ia); }
+                }
+            }
+            sh.Glow = gb; sh.GlowOff = new Point(box.X - pad, box.Y - pad);
+            return sh;
+        }
+
+        public static Hit HitTest(float s, Point p)
+        {
+            Ensure(s);
+            int cx = p.X + Off(X0, s), cy = p.Y + Off(Y0, s);
+            if (map != null && cx >= 0 && cy >= 0 && cx < mw && cy < mh)
+            {
+                byte c = map[cy * mw + cx];
+                if (c == 1) return Hit.CRec; if (c == 2) return Hit.CPause; if (c == 3) return Hit.CStop;
+            }
+            using (var path = Theme.Round(PlateRect(s), 24 * s)) if (path.IsVisible(p)) return Hit.Body;
+            return Hit.None;
+        }
+        static RectangleF PlateRect(float s) { return new RectangleF((Plate.X - X0) * s, (Plate.Y - Y0) * s, Plate.Width * s, Plate.Height * s); }
+
+        static void DrawS(Graphics g, int code, bool glow, Color c, float a, int ox, int oy)
+        {
+            var sh = shapes[code]; if (sh == null || a <= 0.003f) return;
+            if (glow) { Res.DrawTint(g, sh.Glow, sh.GlowOff.X - ox, sh.GlowOff.Y - oy, c, Math.Min(1f, a)); if (a > 1f) Res.DrawTint(g, sh.Glow, sh.GlowOff.X - ox, sh.GlowOff.Y - oy, c, Math.Min(1f, a - 1f)); }
+            else Res.DrawTint(g, sh.Fill, sh.Box.X - ox, sh.Box.Y - oy, c, a);
+        }
+        static void Cavity(Graphics g, int code, Color c, float a, int ox, int oy, float s)
+        {
+            var sh = shapes[code]; if (sh == null || a <= 0.003f) return;
+            var r = new RectangleF(sh.Box.X - ox, sh.Box.Y - oy, sh.Box.Width, sh.Box.Height);
+            r.Inflate(1.5f * s, 1.5f * s);
+            using (var p = new GraphicsPath())
+            {
+                p.AddEllipse(r);
+                using (var br = new PathGradientBrush(p))
+                {
+                    br.CenterPoint = new PointF(sh.C.X - ox - r.Width * 0.08f, sh.C.Y - oy - r.Height * 0.12f);
+                    br.CenterColor = Theme.A(Theme.Mix(c, Color.White, 0.45f), a);
+                    br.SurroundColors = new[] { Theme.A(Theme.Mix(c, Color.Black, 0.25f), a) };
+                    g.FillPath(br, p);
+                }
+            }
+        }
+        static void Glow(Graphics g, GraphicsPath p, Color c, float s, float k)
+        {
+            float[] w = { 7f, 4f, 2f }; float[] a = { 0.07f, 0.12f, 0.22f };
+            for (int i = 0; i < 3; i++) using (var pen = new Pen(Theme.A(c, a[i] * k), w[i] * s) { LineJoin = LineJoin.Round }) g.DrawPath(pen, p);
+        }
+
+        public static void Render(Graphics g, float s, UiState st)
+        {
+            Ensure(s);
+            g.CompositingMode = CompositingMode.SourceCopy; g.Clear(Color.Transparent); g.CompositingMode = CompositingMode.SourceOver;
+            g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            int ox = Off(X0, s), oy = Off(Y0, s);
+            float pulse = (float)(0.5 + 0.5 * Math.Sin(st.T * 2 * Math.PI * 0.8));
+            float pw = 0.2f + 0.8f * st.Power;
+            var pr = PlateRect(s);
+            // тень и плашка
+            for (int i = 4; i >= 1; i--)
+            {
+                var r = pr; r.Inflate(i * 1.5f * s, i * 1.5f * s); r.Offset(0, 2.5f * s);
+                using (var p = Theme.Round(r, (24 + i * 1.5f) * s)) using (var b = new SolidBrush(Color.FromArgb(18, 0, 0, 0))) g.FillPath(b, p);
+            }
+            Color rc = st.Rec == 1 ? Theme.Mix(Theme.Teal, Theme.Red, st.RecK) : st.Rec == 2 ? Theme.Amber : Theme.Teal;
+            float ra = (st.Rec == 1 ? 0.4f + (0.03f + 0.4f * pulse) * st.RecK : st.Rec == 2 ? 0.55f : 0.36f) * pw;
+            using (var p = Theme.Round(pr, 24 * s))
+            {
+                using (var b = new LinearGradientBrush(new RectangleF(pr.X, pr.Y - 1, pr.Width, pr.Height + 2), Color.FromArgb(31, 35, 41), Color.FromArgb(15, 17, 21), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                Glow(g, p, rc, s, ra);
+                using (var pen = new Pen(Theme.A(Theme.Mix(rc, Color.White, 0.1f), ra), 1.2f * s)) g.DrawPath(pen, p);
+            }
+            var hr = pr; hr.Inflate(-2f * s, -2f * s);
+            using (var p = Theme.Round(hr, 22 * s)) using (var pen = new Pen(Color.FromArgb(20, 255, 255, 255), 1f * s)) g.DrawPath(pen, p);
+
+            bool enR = st.IsEn(Hit.CRec), enP = st.IsEn(Hit.CPause), enS = st.IsEn(Hit.CStop);
+            bool hotR = enR && st.Hot == Hit.CRec, hotP = enP && st.Hot == Hit.CPause, hotS = enS && st.Hot == Hit.CStop;
+            bool dnR = hotR && st.Down == Hit.CRec, dnP = hotP && st.Down == Hit.CPause, dnS = hotS && st.Down == Hit.CStop;
+            // под эмблемой: светящиеся полости (буквы ложатся сверху — их края не меняются)
+            if (st.Rec == 1) Cavity(g, 1, Theme.Red, (0.55f + 0.45f * pulse) * Math.Max(0.15f, st.RecK), ox, oy, s);
+            else if (st.Rec == 2) Cavity(g, 1, Theme.Red, 0.22f, ox, oy, s);
+            else if (hotR && !dnR) Cavity(g, 1, Theme.Red, 0.32f, ox, oy, s);
+            if (hotS && !dnS) Cavity(g, 3, Color.FromArgb(150, 170, 185), 0.28f, ox, oy, s);
+            // эмблема 1:1; во время записи строка «BIM DESIGN» уступает место таймеру
+            var band = new RectangleF((TextBand.X - X0) * s, (TextBand.Y - Y0) * s, TextBand.Width * s, TextBand.Height * s);
+            if (st.Rec != 0) g.SetClip(band, CombineMode.Exclude);
+            Res.Draw(g, Res.Get("emblem", s), -ox, -oy, 1f);
+            g.ResetClip();
+            // над эмблемой: свечение, нажатие, подсказки
+            if (st.Rec == 1) DrawS(g, 1, true, Theme.Red, (0.35f + 0.45f * pulse) * st.RecK, ox, oy);
+            if (st.Rec == 2) { DrawS(g, 2, true, Theme.Amber, 0.55f + 0.35f * pulse, ox, oy); DrawS(g, 2, false, Theme.Amber, 0.62f + 0.2f * pulse, ox, oy); }
+            if (hotP) { if (dnP) DrawS(g, 2, false, Color.Black, 0.42f, ox, oy); else { DrawS(g, 2, true, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 1.3f, ox, oy); DrawS(g, 2, false, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 0.22f, ox, oy); } }
+            if (hotR) { if (dnR) DrawS(g, 1, false, Color.Black, 0.45f, ox, oy); else { DrawS(g, 1, true, Theme.Red, 0.7f, ox, oy); Hint(g, 1, ox, oy, s, true); } }
+            if (hotS) { if (dnS) DrawS(g, 3, false, Color.Black, 0.45f, ox, oy); else { DrawS(g, 3, true, Theme.TealHi, 0.9f, ox, oy); Hint(g, 3, ox, oy, s, false); } }
+            // таймер и уровень звука вместо «BIM DESIGN»
+            if (st.Rec != 0)
+            {
+                float cx = (CX - X0) * s, cy = (181f - Y0) * s;
+                Color tc = st.Rec == 1 ? Theme.Mix(Theme.Teal, Theme.Red, st.RecK) : st.Rec == 2 ? Theme.Amber : Theme.Teal;
+                if (st.Rec == 3)
+                {
+                    string t = st.Enh ? (st.Prog >= 0 ? "ОБРАБОТКА " + (int)(st.Prog * 100) + "%" : "ОБРАБОТКА…") : "СОХРАНЯЮ…";
+                    using (var sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                    using (var b = new SolidBrush(Theme.A(Theme.Teal, 0.95f)))
+                        g.DrawString(t, Theme.Px(Theme.UiSemi, 8.6f * s, FontStyle.Regular), b, new RectangleF(cx - 90 * s, cy - 8 * s, 180 * s, 16 * s), sf);
+                }
+                else
+                {
+                    float ta = st.Rec == 2 ? 0.6f + 0.4f * pulse : 1f;
+                    using (var path = new GraphicsPath())
+                    using (var sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                    {
+                        path.AddString(st.Timer, Theme.DigitFam, (int)FontStyle.Regular, 16f * s, new RectangleF(cx - 90 * s, cy - 14 * s, 180 * s, 28 * s), sf);
+                        Glow(g, path, tc, s, 0.8f * ta);
+                        using (var b = new SolidBrush(Theme.A(Theme.Mix(tc, Color.White, 0.15f), ta))) g.FillPath(b, path);
+                    }
+                }
+                if (st.Rec == 1 || st.Rec == 2)
+                {
+                    var lr = new RectangleF(cx - 40 * s, (193f - Y0) * s, 80 * s, 3 * s);
+                    using (var p = Theme.Round(lr, 1.5f * s)) using (var b = new SolidBrush(Theme.A(Theme.Teal, 0.16f))) g.FillPath(b, p);
+                    float lv = st.Rec == 1 && st.MicLive ? Math.Max(0f, Math.Min(1f, (st.PeakDb + 50f) / 50f)) : 0f;
+                    if (lv > 0.01f)
+                    {
+                        var fr = new RectangleF(lr.X, lr.Y, Math.Max(3 * s, lr.Width * lv), lr.Height);
+                        using (var p = Theme.Round(fr, 1.5f * s))
+                        {
+                            Glow(g, p, Theme.Teal, s, 0.7f);
+                            using (var b = new SolidBrush(Theme.Mix(Theme.Teal, Color.White, 0.15f))) g.FillPath(b, p);
+                        }
+                    }
+                }
+            }
+        }
+        // подсказки: красная точка в «d» (Запись), квадрат в «b» (Стоп)
+        static void Hint(Graphics g, int code, int ox, int oy, float s, bool dot)
+        {
+            var sh = shapes[code]; if (sh == null) return;
+            float d = Math.Min(sh.Box.Width, sh.Box.Height) * (dot ? 0.46f : 0.42f);
+            var c = new PointF(sh.C.X - ox + 0.5f, sh.C.Y - oy + 0.5f);
+            var r = new RectangleF(c.X - d / 2, c.Y - d / 2, d, d);
+            Color col = dot ? Theme.Mix(Theme.Red, Color.White, 0.12f) : Color.FromArgb(232, 238, 244);
+            using (var p = dot ? new GraphicsPath() : Theme.Round(r, 2.2f * s))
+            {
+                if (dot) p.AddEllipse(r);
+                Glow(g, p, col, s, 0.9f);
+                using (var b = new SolidBrush(Theme.A(col, 0.95f))) g.FillPath(b, p);
+            }
+        }
+
+        // для --snapshot-compact: маска кнопок поверх кадра и проверка хит-теста в центрах форм
+        public static void DrawMask(Graphics g, float s)
+        {
+            Ensure(s); if (map == null) return;
+            int ox = Off(X0, s), oy = Off(Y0, s);
+            int w = Off(W, s), h = Off(H, s);
+            var b = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            var data = new int[w * h];
+            int[] col = { 0, unchecked((int)0x90FF3030), unchecked((int)0x90FFB020), unchecked((int)0x9030A0FF) };
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+                {
+                    int cx = x + ox, cy = y + oy; if (cx >= mw || cy >= mh) continue;
+                    data[y * w + x] = col[map[cy * mw + cx]];
+                }
+            var d = b.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            for (int y = 0; y < h; y++) Marshal.Copy(data, y * w, d.Scan0 + y * d.Stride, w);
+            b.UnlockBits(d);
+            g.DrawImage(b, new Rectangle(0, 0, w, h), 0, 0, w, h, GraphicsUnit.Pixel); b.Dispose();
+        }
+        public static string Report(float s)
+        {
+            Ensure(s); if (map == null) return "маски нет: " + Info;
+            int ox = Off(X0, s), oy = Off(Y0, s);
+            var sb = new StringBuilder();
+            Func<PointF, string> at = c => HitTest(s, new Point((int)Math.Round(c.X) - ox, (int)Math.Round(c.Y) - oy)).ToString();
+            sb.Append("центр полости d → " + at(shapes[1].C));
+            sb.Append("; центр полости b → " + at(shapes[3].C));
+            sb.Append("; палочка d → " + at(stemC[0]) + "; палочка b → " + at(stemC[1]));
+            sb.Append("; каска → " + HitTest(s, new Point(Off(CX - X0, s), Off(50 - Y0, s))));
+            sb.Append("; угол плашки → " + HitTest(s, new Point(Off(Plate.X - X0 + 30, s), Off(Plate.Bottom - Y0 - 10, s))));
+            sb.Append("; вне плашки → " + HitTest(s, new Point(1, 1)));
+            return sb.ToString();
+        }
+    }
+
     // ---------- Layered-окно: кадр в DIB-секции, UpdateLayeredWindow(ULW_ALPHA) ----------
     class LayeredForm : Form
     {
@@ -1576,6 +1931,276 @@ namespace XyzRecorder
         }
     }
 
+    // ---------- v11: выбор области записи (как в Bandicam) — затемнение на весь виртуальный экран ----------
+    // Процесс DPI-aware: координаты физические, как у gdigrab. Внутри выделения альфа 1 (окно ловит мышь), снаружи — затемнение.
+    class RegionPicker : LayeredForm
+    {
+        public event Action<Rectangle?> Done;
+        public Rectangle Sel;            // выделение в координатах экрана (чётные размеры)
+        Rectangle virt, hintArea; Point a; bool drag, finished; float s;
+        public const int MinSize = 16;
+        public RegionPicker() : this(SystemInformation.VirtualScreen) { }
+        public RegionPicker(Rectangle v)
+        {
+            virt = v; s = Theme.K; ShowInTaskbar = false; TopMost = true; KeyPreview = true; Cursor = Cursors.Cross;
+            Text = "XYZ Запись — выбор области";
+            var pb = Screen.PrimaryScreen.Bounds; pb.Intersect(v); if (pb.IsEmpty) pb = v;
+            hintArea = new Rectangle(pb.X - v.X, pb.Y - v.Y, pb.Width, pb.Height);
+            EnsureFrame(v.Width, v.Height); Location = v.Location;
+        }
+        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x8; return cp; } }   // TOOLWINDOW | TOPMOST
+        public void ShowPicker()
+        {
+            var h = Handle; Bounds = virt;
+            Render(); Present(); Show(); Activate(); Focus();
+        }
+        public void Render()
+        {
+            var loc = Sel.IsEmpty ? Rectangle.Empty : new Rectangle(Sel.X - virt.X, Sel.Y - virt.Y, Sel.Width, Sel.Height);
+            using (var g = Graphics.FromImage(Frame)) Draw(g, loc, FW, FH, hintArea, s);
+        }
+        public static Rectangle EvenRect(Rectangle r) { return new Rectangle(r.X, r.Y, Math.Max(0, r.Width) & ~1, Math.Max(0, r.Height) & ~1); }
+
+        public static void Draw(Graphics g, Rectangle sel, int w, int h, Rectangle hintArea, float s)
+        {
+            bool has = sel.Width > 0 && sel.Height > 0;
+            g.CompositingMode = CompositingMode.SourceCopy;
+            using (var dim = new SolidBrush(Color.FromArgb(125, 6, 9, 12))) g.FillRectangle(dim, 0, 0, w, h);
+            if (has) using (var clr = new SolidBrush(Color.FromArgb(1, 0, 0, 0))) g.FillRectangle(clr, sel);
+            g.CompositingMode = CompositingMode.SourceOver;
+            g.SmoothingMode = SmoothingMode.None; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            if (has)
+            {
+                // рамка 2 px снаружи области (в кадр не попадает) + уголки
+                using (var b = new SolidBrush(Theme.Teal))
+                {
+                    g.FillRectangle(b, sel.X - 2, sel.Y - 2, sel.Width + 4, 2); g.FillRectangle(b, sel.X - 2, sel.Bottom, sel.Width + 4, 2);
+                    g.FillRectangle(b, sel.X - 2, sel.Y, 2, sel.Height); g.FillRectangle(b, sel.Right, sel.Y, 2, sel.Height);
+                }
+                int cl = (int)Math.Round(Math.Min(18 * s, Math.Min(sel.Width, sel.Height) / 3f)), ct = Math.Max(2, (int)Math.Round(3 * s));
+                int e = ct - 2, Lx = sel.X - 2 - e, Rx = sel.Right + 2 + e, Ty = sel.Y - 2 - e, By = sel.Bottom + 2 + e;
+                using (var b = new SolidBrush(Theme.TealHi))
+                {
+                    g.FillRectangle(b, Lx, Ty, cl, ct); g.FillRectangle(b, Lx, Ty, ct, cl);
+                    g.FillRectangle(b, Rx - cl, Ty, cl, ct); g.FillRectangle(b, Rx - ct, Ty, ct, cl);
+                    g.FillRectangle(b, Lx, By - ct, cl, ct); g.FillRectangle(b, Lx, By - cl, ct, cl);
+                    g.FillRectangle(b, Rx - cl, By - ct, cl, ct); g.FillRectangle(b, Rx - ct, By - cl, ct, cl);
+                }
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                string t = sel.Width + " × " + sel.Height + " px";
+                var f = Theme.Px(Theme.UiSemi, 12.5f * s, FontStyle.Regular);
+                var sz = g.MeasureString(t, f, 1000, StringFormat.GenericTypographic);
+                float pw = sz.Width + 20 * s, ph = sz.Height + 10 * s;
+                float px = sel.X, py = sel.Bottom + 10 * s;
+                if (py + ph > h - 4 * s) py = sel.Y - ph - 10 * s;
+                if (py < 4 * s) py = sel.Y + 10 * s;
+                px = Math.Max(4 * s, Math.Min(px, w - pw - 4 * s));
+                Pill(g, new RectangleF(px, py, pw, ph), t, f, Theme.Ink, s);
+            }
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var hf = Theme.Px(Theme.UiFam, 12f * s, FontStyle.Regular);
+            string hint = has ? "Отпустите — запись будет с этой области  ·  Enter — готово  ·  Esc — отмена" : "Тяните рамку мышью  ·  Esc — отмена";
+            var hs = g.MeasureString(hint, hf, 4000, StringFormat.GenericTypographic);
+            float hw = hs.Width + 28 * s, hh = hs.Height + 14 * s;
+            Pill(g, new RectangleF(hintArea.X + (hintArea.Width - hw) / 2, hintArea.Y + 28 * s, hw, hh), hint, hf, Theme.Ink, s);
+        }
+        static void Pill(Graphics g, RectangleF r, string t, Font f, Color c, float s)
+        {
+            using (var p = Theme.Round(r, r.Height / 2))
+            {
+                using (var b = new SolidBrush(Color.FromArgb(235, 16, 19, 23))) g.FillPath(b, p);
+                using (var pen = new Pen(Theme.A(Theme.Teal, 0.7f), 1.2f * s)) g.DrawPath(pen, p);
+            }
+            using (var sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            using (var b = new SolidBrush(c)) g.DrawString(t, f, b, r, sf);
+        }
+
+        Point Scr(Point p) { return new Point(p.X + virt.X, p.Y + virt.Y); }
+        static Rectangle Norm(Point p, Point q) { return Rectangle.FromLTRB(Math.Min(p.X, q.X), Math.Min(p.Y, q.Y), Math.Max(p.X, q.X), Math.Max(p.Y, q.Y)); }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right) { Finish(null); return; }
+            if (e.Button != MouseButtons.Left) return;
+            a = Scr(e.Location); drag = true; Capture = true; Sel = Rectangle.Empty; Render(); Present();
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (!drag) return;
+            var r = Norm(a, Scr(e.Location)); r.Intersect(virt);
+            Sel = EvenRect(r); Render(); Present();
+        }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (!drag) return;
+            drag = false; Capture = false;
+            if (Sel.Width >= MinSize && Sel.Height >= MinSize) Finish(Sel);
+            else { Sel = Rectangle.Empty; Render(); Present(); }
+        }
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape) Finish(null);
+            else if (e.KeyCode == Keys.Enter && Sel.Width >= MinSize && Sel.Height >= MinSize) Finish(Sel);
+            base.OnKeyDown(e);
+        }
+        void Finish(Rectangle? r)
+        {
+            if (finished) return;
+            finished = true; Capture = false; Hide();
+            var d = Done; if (d != null) d(r);
+            BeginInvoke(new Action(() => { Close(); Dispose(); }));
+        }
+    }
+
+    // ---------- v11: рамка вокруг области во время записи — 2 px СНАРУЖИ области, исключена из захвата, мышь пропускает ----------
+    class RegionFrame : LayeredForm
+    {
+        public const int T = 2;
+        public bool AffinityOk;
+        public RegionFrame() { ShowInTaskbar = false; TopMost = true; Text = "XYZ Запись — рамка области"; }
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x08000000 | 0x8 | 0x20; return cp; } }   // TOOLWINDOW | NOACTIVATE | TOPMOST | TRANSPARENT
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); AffinityOk = Native.SetWindowDisplayAffinity(Handle, Native.WDA_EXCLUDEFROMCAPTURE); }
+        public void Place(Rectangle area)
+        {
+            var b = Rectangle.Inflate(area, T, T);
+            EnsureFrame(b.Width, b.Height); Location = b.Location;
+            var h = Handle;
+        }
+        public void SetColor(bool paused)
+        {
+            DrawRing(Frame, FW, FH, T, Color.FromArgb(235, paused ? Theme.Amber : Theme.Red));
+            if (IsHandleCreated) Present();
+        }
+        public static void DrawRing(Bitmap bmp, int w, int h, int t, Color c)
+        {
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.CompositingMode = CompositingMode.SourceCopy;
+                g.Clear(Color.Transparent);
+                using (var b = new SolidBrush(c))
+                {
+                    g.FillRectangle(b, 0, 0, w, t); g.FillRectangle(b, 0, h - t, w, t);
+                    g.FillRectangle(b, 0, t, t, h - 2 * t); g.FillRectangle(b, w - t, t, t, h - 2 * t);
+                }
+            }
+        }
+    }
+
+    // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
+    class AboutForm : Form
+    {
+        public const string Version = "v11";
+        public const float W = 500, H = 268;
+        public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
+        float s; public bool Exclude;
+        List<KeyValuePair<RectangleF, string>> links = new List<KeyValuePair<RectangleF, string>>();
+        RectangleF closeR; public string Hot = ""; bool closeDown;
+        public static string BuildDate
+        {
+            get { try { return File.GetLastWriteTime(Application.ExecutablePath).ToString("dd.MM.yyyy"); } catch { return ""; } }
+        }
+        public AboutForm(float scale)
+        {
+            s = scale; FormBorderStyle = FormBorderStyle.None; AutoScaleMode = AutoScaleMode.None; ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual; KeyPreview = true; DoubleBuffered = true; MaximizeBox = false; MinimizeBox = false;
+            BackColor = Color.FromArgb(18, 21, 25); Text = "О программе — XYZ Запись";
+            ClientSize = new Size((int)Math.Round(W * s), (int)Math.Round(H * s));
+            try { using (var st = Res.Raw("app.ico")) if (st != null) Icon = new Icon(st); } catch { }
+        }
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); if (Exclude) Native.SetWindowDisplayAffinity(Handle, Native.WDA_EXCLUDEFROMCAPTURE); }
+        protected override void OnPaint(PaintEventArgs e) { Draw(e.Graphics); }
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+
+        void T(Graphics g, string t, Font f, Color c, float x, float y)
+        {
+            using (var b = new SolidBrush(c)) g.DrawString(t, f, b, x * s, y * s, StringFormat.GenericTypographic);
+        }
+        float Wd(Graphics g, string t, Font f) { return g.MeasureString(t, f, 4000, StringFormat.GenericTypographic).Width; }
+        void Link(Graphics g, string t, Font f, float x, float y, string url)
+        {
+            bool hot = Hot == url;
+            var c = hot ? Theme.TealHi : Theme.Teal;
+            T(g, t, f, c, x, y);
+            float w = Wd(g, t, f);
+            var r = new RectangleF(x * s, y * s - 2 * s, w, f.Height + 4 * s);
+            if (hot) using (var pen = new Pen(c, Math.Max(1f, s))) g.DrawLine(pen, x * s, y * s + f.Height - 1 * s, x * s + w, y * s + f.Height - 1 * s);
+            links.Add(new KeyValuePair<RectangleF, string>(r, url));
+        }
+        public void Draw(Graphics g)
+        {
+            links.Clear();
+            g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            var r = new RectangleF(0, 0, W * s, H * s);
+            using (var b = new LinearGradientBrush(new RectangleF(0, -1, r.Width, r.Height + 2), Color.FromArgb(28, 32, 38), Color.FromArgb(13, 15, 19), LinearGradientMode.Vertical)) g.FillRectangle(b, r);
+            using (var pen = new Pen(Theme.A(Theme.Teal, 0.55f), Math.Max(1f, s))) g.DrawRectangle(pen, 0.5f * s, 0.5f * s, r.Width - 1.5f * s, r.Height - 1.5f * s);
+            // эмблема — тот же PNG, только равномерный масштаб (геометрия не меняется)
+            float k = 0.74f;
+            var em = Res.Get("emblem", s * k);
+            if (em != null)
+            {
+                var src = new Rectangle((int)(38 * s * k), (int)(28 * s * k), (int)(156 * s * k), (int)(160 * s * k));
+                g.DrawImage(em, new Rectangle((int)Math.Round(20 * s), (int)Math.Round(34 * s), src.Width, src.Height), src, GraphicsUnit.Pixel);
+            }
+            var fT = Theme.Px(Theme.UiSemi, 23f * s, FontStyle.Regular);
+            var f1 = Theme.Px(Theme.UiFam, 11f * s, FontStyle.Regular);
+            var fS = Theme.Px(Theme.UiSemi, 8.4f * s, FontStyle.Regular);
+            float x = 156;
+            T(g, "XYZ Запись", fT, Theme.Ink, x - 1, 24);
+            string bd = BuildDate;
+            T(g, "версия " + Version + (bd.Length > 0 ? "  ·  сборка " + bd : ""), f1, Theme.Mute, x, 60);
+            using (var pen = new Pen(Theme.A(Theme.Teal, 0.22f), Math.Max(1f, s))) g.DrawLine(pen, x * s, 86 * s, (W - 24) * s, 86 * s);
+            T(g, "Бесплатно  ·  лицензия GPL-3.0  ·  без логотипов на видео", f1, Theme.Ink, x, 98);
+            T(g, "Автор: Dmitry Budzhak / db / BIM Design", f1, Theme.Mix(Theme.Mute, Theme.Ink, 0.5f), x, 120);
+            T(g, "TELEGRAM", fS, Theme.Dim, x, 152); Link(g, "Канал «XYZ для Revit» — t.me/xyz_for_revit", f1, x + 62, 150, UrlTg);
+            T(g, "GITHUB", fS, Theme.Dim, x, 174); Link(g, "github.com/Budzhak/XYZ", f1, x + 62, 172, UrlGh);
+            T(g, "FFMPEG", fS, Theme.Dim, x, 196);
+            string ff = "использует FFmpeg (GPL) — ";
+            T(g, ff, f1, Theme.Mute, x + 62, 194); Link(g, "ffmpeg.org", f1, x + 62 + Wd(g, ff, f1) / s + 3, 194, UrlFf);
+            // кнопка «Закрыть»
+            closeR = new RectangleF((W - 124) * s, (H - 46) * s, 100 * s, 28 * s);
+            bool hc = Hot == "close";
+            using (var p = Theme.Round(closeR, 14 * s))
+            {
+                using (var b = new SolidBrush(hc ? Color.FromArgb(closeDown ? 70 : 44, 95, 211, 192) : Color.FromArgb(14, 255, 255, 255))) g.FillPath(b, p);
+                using (var pen = new Pen(Theme.A(Theme.Teal, hc ? 0.95f : 0.6f), Math.Max(1f, 1.1f * s))) g.DrawPath(pen, p);
+            }
+            using (var sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            using (var b = new SolidBrush(hc ? Color.White : Theme.Ink))
+                g.DrawString("Закрыть", Theme.Px(Theme.UiSemi, 11f * s, FontStyle.Regular), b, closeR, sf);
+            T(g, "F9 — старт / стоп записи из любого окна", Theme.Px(Theme.UiFam, 9.5f * s, FontStyle.Regular), Theme.Dim, 22, H - 38);
+        }
+        string HitAt(Point p)
+        {
+            if (closeR.Contains(p)) return "close";
+            foreach (var l in links) if (l.Key.Contains(p)) return l.Value;
+            return "";
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            string h = HitAt(e.Location);
+            if (h != Hot) { Hot = h; Cursor = h.Length > 0 ? Cursors.Hand : Cursors.Default; Invalidate(); }
+            base.OnMouseMove(e);
+        }
+        protected override void OnMouseLeave(EventArgs e) { if (Hot.Length > 0) { Hot = ""; Invalidate(); } base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            string h = HitAt(e.Location);
+            if (h == "close") { closeDown = true; Invalidate(); return; }
+            if (h.Length > 0) { try { Process.Start(h); } catch { } return; }
+            Native.DragWindow(this);
+        }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (closeDown) { closeDown = false; if (HitAt(e.Location) == "close") Close(); else Invalidate(); }
+        }
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Enter) Close();
+            base.OnKeyDown(e);
+        }
+    }
+
     class Anim
     {
         public string Tag;
@@ -1618,6 +2243,10 @@ namespace XyzRecorder
         int msgShow;
         ToolTip tip = new ToolTip();
         public string Log = "";
+        bool compact;          // v11: компактный режим (ini compact=1)
+        RegionFrame rframe;    // v11: рамка вокруг выбранной области во время записи
+        RegionPicker picker;
+        DateTime lastBodyDown = DateTime.MinValue; Point lastBodyPt;
 
         public MainForm()
         {
@@ -1626,7 +2255,8 @@ namespace XyzRecorder
             Text = "XYZ Запись";
             ShowInTaskbar = true;
             try { using (var st = Res.Raw("app.ico")) if (st != null) Icon = new Icon(st); } catch { }
-            EnsureFrame((int)Math.Round(Lay.CW * s), (int)Math.Round(Lay.CH * s));
+            compact = cfg.Get("compact", "0") == "1";
+            ApplyLayout();
             scope.Ensure((int)Math.Round(Lay.Screen.Width * s), (int)Math.Round(Lay.Screen.Height * s), s);
             micOn = cfg.Get("micOn", "1") == "1";
             voiceOn = cfg.Get("voice", "1") == "1";
@@ -1669,13 +2299,36 @@ namespace XyzRecorder
             int cx, cy;
             if (int.TryParse(cfg.Get("x", ""), out cx) && int.TryParse(cfg.Get("y", ""), out cy))
             {
-                var r = new Rectangle(cx, cy, FW, FH);
+                cx += OffX; cy += OffY;   // v11: в ini — начало холста полного прибора
                 foreach (var sc in Screen.AllScreens)
                     if (sc.WorkingArea.IntersectsWith(new Rectangle(cx + FW / 4, cy + FH / 4, FW / 2, FH / 2))) { x = cx; y = cy; break; }
             }
             Location = new Point(x, y);
         }
-        void SavePos() { if (Visible) { cfg.Set("x", Left.ToString()); cfg.Set("y", Top.ToString()); cfg.Save(); } }
+        void SavePos() { if (Visible) { cfg.Set("x", (Left - OffX).ToString()); cfg.Set("y", (Top - OffY).ToString()); cfg.Save(); } }
+
+        // ---------- v11: компактный режим ----------
+        int OffX { get { return compact ? CompactView.Off(CompactView.X0, s) : 0; } }
+        int OffY { get { return compact ? CompactView.Off(CompactView.Y0, s) : 0; } }
+        void ApplyLayout()
+        {
+            if (compact) EnsureFrame((int)Math.Round(CompactView.W * s), (int)Math.Round(CompactView.H * s));
+            else EnsureFrame((int)Math.Round(Lay.CW * s), (int)Math.Round(Lay.CH * s));
+        }
+        // Эмблема остаётся на месте: окно сдвигается на начало вырезки холста.
+        void SetCompact(bool on)
+        {
+            if (on == compact) return;
+            int ox = CompactView.Off(CompactView.X0, s), oy = CompactView.Off(CompactView.Y0, s);
+            compact = on; cfg.Set("compact", on ? "1" : "0"); cfg.Save();
+            ui.Hot = Hit.None; ui.Down = Hit.None; Cursor = Cursors.Default; tip.SetToolTip(this, "");
+            ApplyLayout();
+            Location = on ? new Point(Left + ox, Top + oy) : new Point(Left - ox, Top - oy);
+            RenderMain(); Present();
+            SavePos();
+            if (!frame.Enabled) frame.Start();
+        }
+        Hit HitAt(Point p) { return compact ? CompactView.HitTest(s, p) : DeviceView.HitTest(Lp(p)); }
 
         // ---------- трей ----------
         void BuildTray()
@@ -1785,8 +2438,8 @@ namespace XyzRecorder
         {
             ui.Mic = mic != null ? ShortMic(mic.Name) : "Микрофон";
             ui.MicOn = micOn && mics.Count > 0;
-            ui.Area = area != null ? area.Text : "Весь экран";
-            using (var g = Graphics.FromImage(Frame)) DeviceView.Render(g, s, ui, scope);
+            ui.Area = area != null ? (area.Short ?? area.Text) : "Весь экран";
+            using (var g = Graphics.FromImage(Frame)) { if (compact) CompactView.Render(g, s, ui); else DeviceView.Render(g, s, ui, scope); }
         }
 
         // «Микрофон (Realtek High Definition Audio)» → «Realtek High Definition Audio» (значок микрофона уже есть)
@@ -1879,7 +2532,7 @@ namespace XyzRecorder
         static bool Interactive(Hit h) { return h != Hit.None && h != Hit.Body && h != Hit.Screen; }
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            var h = DeviceView.HitTest(Lp(e.Location));
+            var h = HitAt(e.Location);
             var hot = Interactive(h) && ui.IsEn(h) ? h : Hit.None;
             if (hot != ui.Hot) { ui.Hot = hot; Cursor = hot != Hit.None ? Cursors.Hand : Cursors.Default; }
             if (h == Hit.Screen && ui.Status.Length > 70 && !excl) { if (tip.GetToolTip(this) != ui.Status) tip.SetToolTip(this, ui.Status); }
@@ -1889,11 +2542,20 @@ namespace XyzRecorder
         protected override void OnMouseLeave(EventArgs e) { ui.Hot = Hit.None; base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e)
         {
-            var h = DeviceView.HitTest(Lp(e.Location));
+            var h = HitAt(e.Location);
             if (e.Button == MouseButtons.Right) { ShowBodyMenu(e.Location); return; }
             if (e.Button != MouseButtons.Left) return;
             if (Interactive(h)) { if (ui.IsEn(h)) { ui.Down = h; Capture = true; } return; }
             if (h == Hit.Screen && ui.Clip) { clipT = DateTime.MinValue; peakHold = -140f; return; }
+            // v11: двойной щелчок по эмблеме (вне кнопок) — компактный режим вкл/выкл
+            if (h == Hit.Body && (compact || CompactView.EmbLp.Contains(Lp(e.Location))))
+            {
+                var now = DateTime.Now;
+                if ((now - lastBodyDown).TotalMilliseconds <= SystemInformation.DoubleClickTime && Math.Abs(e.X - lastBodyPt.X) <= 5 && Math.Abs(e.Y - lastBodyPt.Y) <= 5)
+                { lastBodyDown = DateTime.MinValue; SetCompact(!compact); return; }
+                lastBodyDown = now; lastBodyPt = e.Location;
+            }
+            if (h == Hit.None) return;
             Native.DragWindow(this);
             SavePos();
         }
@@ -1901,7 +2563,7 @@ namespace XyzRecorder
         {
             var d = ui.Down; ui.Down = Hit.None; Capture = false;
             if (d == Hit.None) return;
-            if (DeviceView.HitTest(Lp(e.Location)) != d) return;
+            if (HitAt(e.Location) != d) return;
             switch (d)
             {
                 case Hit.Sel1: ShowAreaMenu(); break;
@@ -1915,6 +2577,9 @@ namespace XyzRecorder
                 case Hit.PadStop: StopRec(); break;
                 case Hit.Toggle: PowerOff(); break;
                 case Hit.Skin: ToggleSkin(); break;
+                case Hit.CRec: StartRec(); break;
+                case Hit.CPause: TogglePause(); break;
+                case Hit.CStop: StopRec(); break;
             }
         }
         Point Px(float lx, float ly) { return new Point((int)Math.Round((lx + Lay.P) * s), (int)Math.Round((ly + Lay.P) * s)); }
@@ -1924,13 +2589,19 @@ namespace XyzRecorder
         {
             RefreshAreas();
             var m = NewMenu();
+            bool pickDone = false;
+            var pick = new ToolStripMenuItem("Выбрать область…");
+            pick.ToolTipText = "Тянуть рамку мышью по любому монитору; Esc — отмена.";
+            pick.Click += (o, e) => BeginInvoke(new Action(PickRegion));
             foreach (var a in areas)
             {
                 var it = a;
+                if (a.Kind == 2 && !pickDone) { m.Items.Add(pick); m.Items.Add(new ToolStripSeparator()); pickDone = true; }
                 var mi = new ToolStripMenuItem(a.Text) { Checked = area != null && area.Key == a.Key };
                 mi.Click += (o, e) => { area = it; if (it.Kind != 2) { cfg.Set("area", it.Key); cfg.Save(); } };
                 m.Items.Add(mi);
             }
+            if (!pickDone) m.Items.Add(pick);
             return m;
         }
         public ContextMenuStrip BuildMicMenu()
@@ -1959,7 +2630,7 @@ namespace XyzRecorder
         ToolStripMenuItem VoiceItem()
         {
             var v = new ToolStripMenuItem("Улучшить голос") { Checked = voiceOn };
-            v.ToolTipText = "После «Стоп» звук обрабатывается: шумодав, выравнивание громкости, студийный тембр.\nОригинал сохраняется в папке _raw.";
+            v.ToolTipText = "После «Стоп» звук обрабатывается: шумодав, выравнивание громкости, студийный тембр.\nОригинал хранится 7 дней — меню «Открыть исходники».";
             v.Click += (o, e) =>
             {
                 voiceOn = !voiceOn; cfg.Set("voice", voiceOn ? "1" : "0"); cfg.Save();
@@ -2001,9 +2672,65 @@ namespace XyzRecorder
             sk1.Click += (o, e) => ToggleSkin();
             var t1 = new ToolStripMenuItem("Выключить (в трей)"); t1.Click += (o, e) => PowerOff();
             var x1 = new ToolStripMenuItem("Выход"); x1.Click += (o, e) => ExitApp();
-            m.Items.AddRange(new ToolStripItem[] { f1, f2, new ToolStripSeparator(), VoiceItem(), new ToolStripSeparator(), r1, r2, new ToolStripSeparator(), sk1, c1, c2, new ToolStripSeparator(), t1, x1 });
+            var cm = new ToolStripMenuItem("Компактный режим") { Checked = compact };
+            cm.ToolTipText = "Остаётся плашка с эмблемой: Запись — кружок «d», Пауза — палочки «d» и «b», Стоп — кружок «b».\nДвойной щелчок по эмблеме — переключить.";
+            cm.Click += (o, e) => SetCompact(!compact);
+            var rw = new ToolStripMenuItem("Открыть исходники"); rw.ToolTipText = "Записи до «Улучшить голос» (хранятся 7 дней).";
+            rw.Click += (o, e) => { try { Directory.CreateDirectory(Engine.RawDir); Process.Start("explorer.exe", "\"" + Engine.RawDir + "\""); } catch { } };
+            var ab = new ToolStripMenuItem("О программе…"); ab.Click += (o, e) => BeginInvoke(new Action(ShowAbout));
+            m.Items.AddRange(new ToolStripItem[] { cm, new ToolStripSeparator(), f1, f2, rw, new ToolStripSeparator(), VoiceItem(), new ToolStripSeparator(), r1, r2, new ToolStripSeparator(), sk1, c1, c2, new ToolStripSeparator(), t1, ab, x1 });
             return m;
         }
+
+        void ShowAbout()
+        {
+            using (var f = new AboutForm(s))
+            {
+                var wa = Screen.FromControl(this).WorkingArea;
+                int x = Left + Width / 2 - f.Width / 2, y = Top + Height / 2 - f.Height / 2;
+                f.Location = new Point(Math.Max(wa.X, Math.Min(x, wa.Right - f.Width)), Math.Max(wa.Y, Math.Min(y, wa.Bottom - f.Height)));
+                f.TopMost = TopMost; f.Exclude = excl;
+                f.ShowDialog(this);
+            }
+        }
+
+        // ---------- v11: выбор области ----------
+        void PickRegion()
+        {
+            if (state != St.Idle || starting || picker != null) return;
+            picker = new RegionPicker();
+            picker.Done += r =>
+            {
+                picker = null;
+                if (!r.HasValue) { SetStatus("Выбор области отменён.", false); return; }
+                var v = r.Value;
+                cfg.Set("region", string.Format("{0},{1},{2},{3}", v.X, v.Y, v.Width, v.Height)); cfg.Set("area", "region"); cfg.Save();
+                area = null; RefreshAreas();
+                SetStatus(string.Format("Область {0}×{1} — F9 или «Запись» начнёт запись с неё.", v.Width, v.Height), false);
+                if (Visible) Activate();
+            };
+            picker.ShowPicker();
+        }
+        static bool TryRect(string t, out Rectangle r)
+        {
+            r = Rectangle.Empty;
+            var p = (t ?? "").Split(',');
+            int x, y, w, h;
+            if (p.Length != 4 || !int.TryParse(p[0], out x) || !int.TryParse(p[1], out y) || !int.TryParse(p[2], out w) || !int.TryParse(p[3], out h)) return false;
+            if (w < RegionPicker.MinSize || h < RegionPicker.MinSize) return false;
+            r = new Rectangle(x, y, w, h); return true;
+        }
+        void ShowRegionFrame()
+        {
+            if (area == null || area.Kind != 3 || Program.SelfTestMode) return;
+            try
+            {
+                if (rframe == null) rframe = new RegionFrame();
+                rframe.Place(capRect); rframe.SetColor(false); rframe.Show(); rframe.SetColor(false);
+            }
+            catch { }
+        }
+        void HideRegionFrame() { try { if (rframe != null) rframe.Hide(); } catch { } }
 
         string Folder
         {
@@ -2049,6 +2776,9 @@ namespace XyzRecorder
                 for (int i = 0; i < scr.Length; i++)
                     areas.Add(new AreaItem { Kind = 1, Mon = i, Key = "mon:" + i,
                         Text = string.Format("Монитор {0} — {1}×{2}{3}", i + 1, scr[i].Bounds.Width, scr[i].Bounds.Height, scr[i].Primary ? " (основной)" : "") });
+            Rectangle rr;   // v11: последняя выбранная область
+            if (TryRect(cfg.Get("region", ""), out rr))
+                areas.Add(new AreaItem { Kind = 3, Key = "region", Rect = rr, Text = string.Format("Область {0}×{1} (последняя)", rr.Width, rr.Height), Short = string.Format("Область {0}×{1}", rr.Width, rr.Height) });
             uint myPid = (uint)Process.GetCurrentProcess().Id;
             Native.EnumWindows((h, l) =>
             {
@@ -2085,6 +2815,12 @@ namespace XyzRecorder
                 var scr = Screen.AllScreens; if (it.Mon >= scr.Length) { err = "Монитор не найден — откройте список заново."; return false; }
                 capRect = Even(scr[it.Mon].Bounds); eng.Area = capRect; cfg.Set("area", it.Key); cfg.Save(); return true;
             }
+            if (it.Kind == 3)
+            {
+                var rc3 = Even(it.Rect);
+                if (rc3.Width < RegionPicker.MinSize || rc3.Height < RegionPicker.MinSize) { err = "Область вне экрана — выберите её заново."; return false; }
+                capRect = rc3; eng.Area = rc3; cfg.Set("area", "region"); cfg.Save(); return true;
+            }
             if (!Native.IsWindow(it.Hwnd)) { err = "Окно уже закрыто — выберите область заново."; return false; }
             if (Native.IsIconic(it.Hwnd)) Native.ShowWindow(it.Hwnd, 9);
             Native.SetForegroundWindow(it.Hwnd);
@@ -2114,6 +2850,9 @@ namespace XyzRecorder
             ui.En[(int)Hit.Close] = true;
             ui.En[(int)Hit.Toggle] = state != St.Saving && powered;
             ui.En[(int)Hit.Skin] = powered;
+            ui.En[(int)Hit.CRec] = ui.En[(int)Hit.PadRec];      // v11: кнопки компактного режима
+            ui.En[(int)Hit.CPause] = ui.En[(int)Hit.PadPause];
+            ui.En[(int)Hit.CStop] = ui.En[(int)Hit.PadStop];
         }
 
         // ---------- уровень, осциллограф и проба ----------
@@ -2298,6 +3037,7 @@ namespace XyzRecorder
             sw.Start(); state = St.Rec;
             UpdateButtons(); UpdateTime();
             StartMeter(false);
+            ShowRegionFrame();   // v11
         }
 
         void TogglePause()
@@ -2313,6 +3053,7 @@ namespace XyzRecorder
                 if (!eng.StartSegment()) { SetStatus("Не удалось продолжить: " + eng.LastError, true); return; }
                 sw.Start(); state = St.Rec; UpdateButtons();
             }
+            if (rframe != null && rframe.Visible) rframe.SetColor(state == St.Paused);   // v11
         }
 
         void StopRec()
@@ -2320,6 +3061,7 @@ namespace XyzRecorder
             if (state != St.Rec && state != St.Paused) return;
             if (state == St.Rec) { sw.Stop(); acc += sw.Elapsed; sw.Reset(); eng.StopSegment(); }
             ApplyExclude(false);   // v7: запись остановлена — прибор снова виден скриншотам
+            HideRegionFrame();     // v11
             ui.RecK = 1f;
             state = St.Saving; UpdateTime(); UpdateButtons();
             HideOverlay();
@@ -2411,6 +3153,7 @@ namespace XyzRecorder
             frame.Stop();
             if (tray != null) { tray.Visible = false; tray.Dispose(); tray = null; }
             if (ov != null) { ov.Dispose(); ov = null; }
+            if (rframe != null) { rframe.Dispose(); rframe = null; }
             base.OnFormClosing(e);
         }
 
@@ -2486,10 +3229,18 @@ namespace XyzRecorder
         }
         public void SnapSkin(float k, float lever2) { ui.SkinK = k; ui.Lever2 = lever2; }
         public PlaqueForm Plaque { get { return ov; } }
+        public void SnapCompact(bool on) { compact = on; ApplyLayout(); }
+        public float SnapScale { get { return s; } }
+        public Bitmap SnapMask()
+        {
+            var b = Snap(0, 1f, 1f, Hit.None, Hit.None, 0f, "", false, 10.0);
+            using (var g = Graphics.FromImage(b)) CompactView.DrawMask(g, s);
+            return b;
+        }
         public void SetScale(float sc)
         {
             s = sc;
-            EnsureFrame((int)Math.Round(Lay.CW * s), (int)Math.Round(Lay.CH * s));
+            ApplyLayout();
             scope = new Scope(); scope.Ensure((int)Math.Round(Lay.Screen.Width * s), (int)Math.Round(Lay.Screen.Height * s), s);
             ov.Dispose(); ov = new PlaqueForm(s);
         }
@@ -2511,6 +3262,15 @@ namespace XyzRecorder
             foreach (var a in args) if (a.Trim().ToLower() == "--selftest-audio") return SelfTestAudio();
             foreach (var a in args) if (a.Trim().ToLower() == "--snapshot") return Snapshot();
             foreach (var a in args) if (a.Trim().ToLower() == "--mictest") return MicTest();
+            for (int i = 0; i < args.Length; i++)
+            {
+                string k = args[i].Trim().ToLower();
+                if (k == "--snapshot-compact") return Snapshot11("compact");
+                if (k == "--snapshot-about") return Snapshot11("about");
+                if (k == "--snapshot-region") return Snapshot11("region");
+                if (k == "--regiontest") return RegionTest(i + 1 < args.Length ? args[i + 1] : "100,100,640,360");
+            }
+            try { var ct = new Thread(() => Engine.CleanRaw(7)); ct.IsBackground = true; ct.Start(); } catch { }   // v11
             bool created;
             using (var mx = new Mutex(true, "XYZ_Recorder_single", out created))
             {
@@ -2589,6 +3349,158 @@ namespace XyzRecorder
                 return 0;
             }
             catch (Exception ex) { log.AppendLine("FAIL " + ex); try { File.WriteAllText(logf, log.ToString(), Encoding.UTF8); } catch { } return 1; }
+        }
+        // ---------- v11: снимки без показа окон (test\snap11) ----------
+        static int Snapshot11(string which)
+        {
+            SnapshotMode = true; Settings.ReadOnly = true;
+            string dir = Path.Combine(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test"), "snap11");
+            Directory.CreateDirectory(dir);
+            string logf = Path.Combine(dir, "snapshot_v11_" + which + ".log");
+            var log = new StringBuilder("snapshot v11 " + which + " " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + ", DPI k=" + Theme.K + "\r\n");
+            try
+            {
+                if (which == "compact")
+                {
+                    using (var f = new MainForm())
+                    {
+                        f.SnapPrep();
+                        foreach (float sc in new[] { 1f, 2f, 1.25f })
+                        {
+                            f.SnapCompact(true); f.SetScale(sc);
+                            string suf = sc == 1f ? "" : sc == 2f ? "@2x" : "@125";
+                            f.SnapRecK = 1f;
+                            Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "c_idle" + suf + ".png");
+                            Save(f.Snap(0, 1f, 1f, Hit.CRec, Hit.None, 0.28f, "", false, 10.0), dir, "c_hover_rec" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.5f, "", false, 12.8125), dir, "c_rec" + suf + ".png");
+                            Save(f.Snap(2, 1f, 1f, Hit.None, Hit.None, 0.12f, "", false, 12.8125), dir, "c_paused" + suf + ".png");
+                            log.AppendLine("scale " + sc + ": " + CompactView.Info);
+                            log.AppendLine("  хит-тест: " + CompactView.Report(sc));
+                            if (sc == 1.25f) continue;
+                            Save(f.Snap(0, 1f, 1f, Hit.CRec, Hit.CRec, 0.28f, "", false, 10.0), dir, "c_down_rec" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.CPause, Hit.None, 0.5f, "", false, 11.5), dir, "c_hover_pause" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.CStop, Hit.None, 0.5f, "", false, 11.5), dir, "c_hover_stop" + suf + ".png");
+                            Save(f.Snap(1, 1f, 1f, Hit.CStop, Hit.CStop, 0.5f, "", false, 11.5), dir, "c_down_stop" + suf + ".png");
+                            Save(f.Snap(2, 1f, 1f, Hit.CPause, Hit.None, 0.12f, "", false, 12.8125), dir, "c_hover_pause_paused" + suf + ".png");
+                            Save(f.SnapProc(0.42f, 14.0), dir, "c_saving" + suf + ".png");
+                            Save(f.SnapMask(), dir, "c_mask" + suf + ".png");
+                        }
+                        f.SnapCompact(false); f.SetScale(1f);
+                        Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "full_idle.png");
+                        try
+                        {
+                            foreach (var kv in new[] { new KeyValuePair<string, ContextMenuStrip>("menu_body.png", f.BuildBodyMenu()), new KeyValuePair<string, ContextMenuStrip>("menu_area.png", f.BuildAreaMenu()) })
+                            {
+                                var m = kv.Value; var sz = m.GetPreferredSize(Size.Empty); m.Size = sz;
+                                var b = new Bitmap(sz.Width, sz.Height);
+                                m.DrawToBitmap(b, new Rectangle(0, 0, sz.Width, sz.Height));
+                                Save(b, dir, kv.Key); m.Dispose();
+                            }
+                        }
+                        catch (Exception ex) { log.AppendLine("menu: " + ex.Message); }
+                        log.Append(f.Log);
+                    }
+                }
+                else if (which == "about")
+                {
+                    foreach (float sc in new[] { 1f, 2f })
+                        using (var a = new AboutForm(sc))
+                        {
+                            var b = new Bitmap(a.ClientSize.Width, a.ClientSize.Height, PixelFormat.Format32bppArgb);
+                            using (var g = Graphics.FromImage(b)) a.Draw(g);
+                            Save(b, dir, "about" + (sc == 1f ? "" : "@2x") + ".png");
+                            a.Hot = AboutForm.UrlTg;
+                            b = new Bitmap(a.ClientSize.Width, a.ClientSize.Height, PixelFormat.Format32bppArgb);
+                            using (var g = Graphics.FromImage(b)) a.Draw(g);
+                            Save(b, dir, "about_hover" + (sc == 1f ? "" : "@2x") + ".png");
+                        }
+                    log.AppendLine("build date: " + AboutForm.BuildDate);
+                }
+                else if (which == "region")
+                {
+                    int W = 1280, H = 720;
+                    var sel = new Rectangle(300, 170, 640, 360);
+                    using (var bg = FakeDesktop(W, H))
+                    {
+                        using (var p = new RegionPicker(new Rectangle(0, 0, W, H)))
+                        {
+                            p.Sel = Rectangle.Empty; p.Render();
+                            using (var fr = p.CopyFrame()) Save(Over(bg, fr), dir, "region_start.png");
+                            p.Sel = sel; p.Render();
+                            using (var fr = p.CopyFrame()) Save(Over(bg, fr), dir, "region_pick.png");
+                        }
+                        var o = Rectangle.Inflate(sel, RegionFrame.T, RegionFrame.T);
+                        using (var ring = new Bitmap(o.Width, o.Height, PixelFormat.Format32bppPArgb))
+                        {
+                            RegionFrame.DrawRing(ring, o.Width, o.Height, RegionFrame.T, Color.FromArgb(235, Theme.Red));
+                            var b = new Bitmap(bg);
+                            using (var g = Graphics.FromImage(b)) g.DrawImage(ring, new Rectangle(o.X, o.Y, o.Width, o.Height), 0, 0, o.Width, o.Height, GraphicsUnit.Pixel);
+                            Save(b, dir, "region_rec.png");
+                        }
+                    }
+                    log.AppendLine("virtual screen: " + SystemInformation.VirtualScreen + ", even(641x361)=" + RegionPicker.EvenRect(new Rectangle(0, 0, 641, 361)).Size);
+                }
+                log.AppendLine("ok");
+                File.WriteAllText(logf, log.ToString(), Encoding.UTF8);
+                return 0;
+            }
+            catch (Exception ex) { log.AppendLine("FAIL " + ex); try { File.WriteAllText(logf, log.ToString(), Encoding.UTF8); } catch { } return 1; }
+        }
+        static Bitmap FakeDesktop(int w, int h)
+        {
+            var b = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(b))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var br = new LinearGradientBrush(new Rectangle(0, 0, w, h), Color.FromArgb(52, 86, 120), Color.FromArgb(150, 170, 160), 35f)) g.FillRectangle(br, 0, 0, w, h);
+                var wins = new[] { new Rectangle(120, 80, 760, 470), new Rectangle(640, 260, 520, 380) };
+                for (int i = 0; i < wins.Length; i++)
+                {
+                    var r = wins[i];
+                    using (var sh = new SolidBrush(Color.FromArgb(60, 0, 0, 0))) g.FillRectangle(sh, r.X + 6, r.Y + 8, r.Width, r.Height);
+                    using (var wb = new SolidBrush(Color.FromArgb(246, 247, 249))) g.FillRectangle(wb, r);
+                    using (var tb = new SolidBrush(i == 0 ? Color.FromArgb(32, 64, 110) : Color.FromArgb(70, 74, 80))) g.FillRectangle(tb, r.X, r.Y, r.Width, 30);
+                    using (var tf = new Font("Segoe UI", 10f)) g.DrawString(i == 0 ? "Revit 2025 — план 1 этажа (фиктивный фон)" : "Проводник", tf, Brushes.White, r.X + 10, r.Y + 6);
+                    using (var pen = new Pen(Color.FromArgb(150, 160, 170), 1f))
+                        for (int k = 1; k < 9; k++) g.DrawLine(pen, r.X + 20, r.Y + 30 + k * (r.Height - 40) / 9, r.Right - 20, r.Y + 30 + k * (r.Height - 40) / 9);
+                }
+            }
+            return b;
+        }
+        // Ключ --regiontest x,y,w,h: запись области 2 с без звука и без окон (тот же Engine, что у прибора) → test\snap11\region_test.mp4
+        static int RegionTest(string spec)
+        {
+            string dir = Path.Combine(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test"), "snap11");
+            Directory.CreateDirectory(dir);
+            string logf = Path.Combine(dir, "regiontest.log");
+            var log = new StringBuilder("regiontest " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + spec + ", virtual=" + SystemInformation.VirtualScreen + "\r\n");
+            int code = 1;
+            try
+            {
+                var p = spec.Split(',');
+                var r = new Rectangle(int.Parse(p[0]), int.Parse(p[1]), int.Parse(p[2]), int.Parse(p[3]));
+                r = Rectangle.Intersect(r, SystemInformation.VirtualScreen);
+                r = RegionPicker.EvenRect(r);
+                var eng = new Engine();
+                eng.Ffmpeg = Engine.FindFfmpeg();
+                eng.WorkDir = Path.Combine(dir, "rt_" + DateTime.Now.ToString("HHmmss"));
+                eng.Area = r;
+                log.AppendLine("ffmpeg " + eng.Ffmpeg + ", area " + r);
+                bool ok = eng.StartSegment();
+                log.AppendLine("start " + ok + " " + eng.LastError);
+                if (ok)
+                {
+                    Thread.Sleep(2000);
+                    ok = eng.StopSegment(); log.AppendLine("stop " + ok);
+                    string outF = Path.Combine(dir, "region_test.mp4");
+                    ok = ok && eng.Finalize(outF); log.AppendLine("finalize " + ok + " " + (File.Exists(outF) ? new FileInfo(outF).Length.ToString() : "-"));
+                    if (ok) { eng.CleanupSegments(); code = 0; }
+                    else log.AppendLine(eng.LastError);
+                }
+            }
+            catch (Exception ex) { log.AppendLine("FAIL " + ex); }
+            try { File.WriteAllText(logf, log.ToString(), Encoding.UTF8); } catch { }
+            return code;
         }
         // Ключ --mictest: открыть микрофон через waveIn на 1 с, записать, что вернула Windows.
         static int MicTest()
