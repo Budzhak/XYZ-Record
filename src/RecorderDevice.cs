@@ -1,4 +1,8 @@
-﻿﻿// XYZ Запись v15 (01.11.2026): мини-осциллограф компактного режима работает от звука, как большой осциллограф полного режима:
+﻿﻿// XYZ Запись v16 (01.11.2026): компактный режим — в верхних углах плашки (по бокам от каски) невидимые зоны: курсор в левом углу —
+// плавно (~150 мс) появляется круглая тёмная кнопка «Свернуть» (–), в правом — «Закрыть» (×), размер как у кнопок полного режима (R 10).
+// Наведение на кнопку: «Свернуть» загорается янтарём (как пауза), «Закрыть» — красным (как запись). Действия те же, что у «–»/«×» полного
+// режима (PowerOff / ExitApp). Хит-тест кнопок раньше перетаскивания; каска и буквы не перекрываются. --snapshot-compact: c_corner_*.png.
+// XYZ Запись v15 (01.11.2026): мини-осциллограф компактного режима работает от звука, как большой осциллограф полного режима:
 // каждый кадр — тот же текущий буфер сэмплов (sbuf) и тот же Scope.Points (триггер по переходу через ноль, tanh-усиление),
 // без истории и прокрутки. Тишина — сразу ровная тонкая линия, голос — волна вибрирует на месте. Геометрия, цвета, таймер — как в v14.
 // XYZ Запись v14 (01.11.2026): компактный режим — в полости «d» всегда видна красная точка (как на кнопке «Запись» прибора, ~43% полости:
@@ -1010,7 +1014,7 @@ namespace XyzRecorder
         public static readonly PointF QPause = new PointF(244, 28), QStop = new PointF(280, 28); public const float QR = 15;
     }
 
-    enum Hit { None = 0, Sel1, Sel2, Test, Folder, Min, Close, PadRec, PadPause, PadStop, Toggle, Screen, Body, QPause, QStop, Skin, CRec, CPause, CStop }
+    enum Hit { None = 0, Sel1, Sel2, Test, Folder, Min, Close, PadRec, PadPause, PadStop, Toggle, Screen, Body, QPause, QStop, Skin, CRec, CPause, CStop, CMin, CClose }
 
     class UiState
     {
@@ -1023,7 +1027,8 @@ namespace XyzRecorder
         public bool MicOn = true, MicBlocked, MicLive;
         public string TestText = "Проверить";
         public Hit Hot, Down;
-        public bool[] En = new bool[20];
+        public bool[] En = new bool[24];
+        public float CornL, CornR;      // v16: видимость угловых кнопок компактного режима 0…1 (fade ~150 мс)
         public double T;                // секунды — для пульса
         public float PeakDb = -140f; public bool Clip;
         public float Lever2 = 1f;       // v8: рычаг «Облик» 1 — вверх («Корпус»), 0 — вниз («Рамка»)
@@ -1702,6 +1707,22 @@ namespace XyzRecorder
         // v13: мини-осциллограф = полоса уровня v11 (80 px по X, ось y=194,5 — под таймером v11 y=181; волна ±5 px);
         // в покое при включённом питании — та же полоса на месте «BIM DESIGN» (ось y=178,5 — середина строки надписи).
         public const float MW = 80, MH = 11, MYIdle = 178.5f, MYRec = 194.5f;
+        // v16: угловые кнопки (холст): центры — 22 px от верхних углов плашки, радиус как у кнопок полного режима (Lay.BR);
+        // зоны наведения 50×48 px в верхних углах плашки (каска и рулон начинаются с x≈79 и кончаются x≈139 — не задеваются).
+        public static readonly PointF BMinC = new PointF(48, 44), BCloseC = new PointF(184, 44);
+        public const float CornW = 50, CornH = 48;
+        // 0 — вне углов, 1 — левый верхний (Свернуть), 2 — правый верхний (Закрыть); только внутри скруглённой плашки
+        public static int CornerAt(float s, Point p)
+        {
+            float lx = p.X / s + X0, ly = p.Y / s + Y0;
+            if (ly < Plate.Y || ly > Plate.Y + CornH) return 0;
+            int k = lx >= Plate.X && lx <= Plate.X + CornW ? 1 : lx <= Plate.Right && lx >= Plate.Right - CornW ? 2 : 0;
+            if (k == 0) return 0;
+            using (var path = Theme.Round(PlateRect(s), 24 * s)) if (!path.IsVisible(p)) return 0;
+            return k;
+        }
+        static PointF CornC(float s, Hit h) { var c = h == Hit.CMin ? BMinC : BCloseC; return new PointF((c.X - X0) * s, (c.Y - Y0) * s); }
+        static bool OnCornBtn(float s, Point p, Hit h) { var c = CornC(s, h); float dx = p.X - c.X, dy = p.Y - c.Y, r = (Lay.BR + 2) * s; return dx * dx + dy * dy <= r * r; }
         static Bitmap embNT; static float embNTs = -1f;
         // Эмблема без надписи «BIM DESIGN»: стираются только бирюзовые пиксели надписи (G−R > 55) в строке надписи;
         // беловатое свечение низа букв «db» остаётся — горизонтального среза нет.
@@ -1876,6 +1897,8 @@ namespace XyzRecorder
         public static Hit HitTest(float s, Point p)
         {
             Ensure(s);
+            if (OnCornBtn(s, p, Hit.CMin)) return Hit.CMin;       // v16: угловые кнопки — раньше маски и перетаскивания
+            if (OnCornBtn(s, p, Hit.CClose)) return Hit.CClose;
             int cx = p.X + Off(X0, s), cy = p.Y + Off(Y0, s);
             if (map != null && cx >= 0 && cy >= 0 && cx < mw && cy < mh)
             {
@@ -1992,6 +2015,46 @@ namespace XyzRecorder
                 if ((st.Rec == 1 || st.Rec == 2) && mini != null)
                     MiniScope(g, s, mini, MYRec, st.Rec == 2 ? Theme.Amber : Theme.Teal, st.Rec == 2, 1f);
             }
+            // v16: угловые кнопки — поверх всего, только при наведении на угол
+            CornerBtn(g, s, st, Hit.CMin, st.CornL);
+            CornerBtn(g, s, st, Hit.CClose, st.CornR);
+        }
+        // v16: круглая тёмная кнопка как «–»/«×» полного режима; наведение — «Свернуть» янтарём (пауза), «Закрыть» красным (запись).
+        static void CornerBtn(Graphics g, float s, UiState st, Hit h, float a)
+        {
+            if (a <= 0.003f) return;
+            a = Math.Min(1f, a); a = a * a * (3 - 2 * a);
+            var c = CornC(s, h); float r = Lay.BR * s;
+            bool en = st.IsEn(h), hot = en && st.Hot == h, down = hot && st.Down == h;
+            Color hc = h == Hit.CClose ? Theme.Red : Theme.Amber;
+            var rr = new RectangleF(c.X - r, c.Y - r, 2 * r, 2 * r);
+            var sr = rr; sr.Inflate(1.2f * s, 1.2f * s); sr.Offset(0, 0.8f * s);
+            using (var b = new SolidBrush(Theme.A(Color.Black, 0.40f * a))) g.FillEllipse(b, sr);
+            using (var p = new GraphicsPath())
+            {
+                p.AddEllipse(rr);
+                if (hot)
+                {
+                    if (!down) Glow(g, p, hc, s, 1.0f * a);
+                    Color c1 = down ? Theme.Mix(hc, Color.Black, 0.30f) : Theme.Mix(hc, Color.White, 0.12f);
+                    Color c2 = down ? Theme.Mix(hc, Color.Black, 0.45f) : Theme.Mix(hc, Color.Black, 0.12f);
+                    using (var b = new LinearGradientBrush(new RectangleF(rr.X, rr.Y - 1, rr.Width, rr.Height + 2), Theme.A(c1, a), Theme.A(c2, a), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                    using (var pen = new Pen(Theme.A(Theme.Mix(hc, Color.White, 0.35f), 0.85f * a), 1f * s)) g.DrawPath(pen, p);
+                }
+                else
+                {
+                    using (var b = new LinearGradientBrush(new RectangleF(rr.X, rr.Y - 1, rr.Width, rr.Height + 2), Theme.A(Color.FromArgb(46, 52, 60), a), Theme.A(Color.FromArgb(24, 27, 32), a), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                    using (var pen = new Pen(Theme.A(Color.White, 0.16f * a), 1f * s)) g.DrawPath(pen, p);
+                }
+            }
+            Color ic = hot ? (h == Hit.CClose ? Color.White : Color.FromArgb(40, 26, 6)) : Color.FromArgb(170, 178, 188);
+            float ia = en ? a : 0.4f * a;
+            using (var pen = new Pen(Theme.A(ic, ia), 1.6f * s) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            {
+                float k = 3.6f * s;
+                if (h == Hit.CMin) g.DrawLine(pen, c.X - k, c.Y + 0.5f * s, c.X + k, c.Y + 0.5f * s);
+                else { g.DrawLine(pen, c.X - k, c.Y - k, c.X + k, c.Y + k); g.DrawLine(pen, c.X - k, c.Y + k, c.X + k, c.Y - k); }
+            }
         }
         // v13: мини-осциллограф — дорожка полосы уровня v11 (80×3, приглушённая) и бегущая волна по её оси.
         static void MiniScope(Graphics g, float s, MiniWave mini, float yc, Color c, bool dim, float power)
@@ -2084,6 +2147,12 @@ namespace XyzRecorder
             sb.Append("; каска → " + HitTest(s, new Point(Off(CX - X0, s), Off(50 - Y0, s))));
             sb.Append("; угол плашки → " + HitTest(s, new Point(Off(Plate.X - X0 + 30, s), Off(Plate.Bottom - Y0 - 10, s))));
             sb.Append("; вне плашки → " + HitTest(s, new Point(1, 1)));
+            var pm = CornC(s, Hit.CMin); var pc = CornC(s, Hit.CClose);
+            sb.Append("; кнопка «свернуть» → " + HitTest(s, Point.Round(pm)) + "; кнопка «закрыть» → " + HitTest(s, Point.Round(pc)));
+            sb.Append("; угол слева (зона) → " + CornerAt(s, new Point(Off(Plate.X - X0 + 8, s), Off(Plate.Y - Y0 + 40, s))) + "/" + HitTest(s, new Point(Off(Plate.X - X0 + 8, s), Off(Plate.Y - Y0 + 40, s))));
+            sb.Append("; угол справа (зона) → " + CornerAt(s, new Point(Off(Plate.Right - X0 - 8, s), Off(Plate.Y - Y0 + 40, s))));
+            sb.Append("; каска (зона) → " + CornerAt(s, new Point(Off(CX - X0, s), Off(50 - Y0, s))));
+            sb.Append("; вне скругления → " + CornerAt(s, new Point(Off(Plate.X - X0 + 1, s), Off(Plate.Y - Y0 + 1, s))));
             return sb.ToString();
         }
     }
@@ -2419,7 +2488,7 @@ namespace XyzRecorder
     // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
     class AboutForm : Form
     {
-        public const string Version = "v15";
+        public const string Version = "v16";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -2578,6 +2647,7 @@ namespace XyzRecorder
         RegionFrame rframe;    // v11: рамка вокруг выбранной области во время записи
         RegionPicker picker;
         DateTime lastBodyDown = DateTime.MinValue; Point lastBodyPt;
+        int corner;            // v16: угол компактного режима под курсором (0 — нет, 1 — свернуть, 2 — закрыть)
 
         public MainForm()
         {
@@ -2666,6 +2736,7 @@ namespace XyzRecorder
             int ox = CompactView.Off(CompactView.X0, s), oy = CompactView.Off(CompactView.Y0, s);
             compact = on; cfg.Set("compact", on ? "1" : "0"); cfg.Save();
             ui.Hot = Hit.None; ui.Down = Hit.None; Cursor = Cursors.Default; tip.SetToolTip(this, "");
+            corner = 0; ui.CornL = 0f; ui.CornR = 0f;   // v16
             ApplyLayout();
             Location = on ? new Point(Left + ox, Top + oy) : new Point(Left - ox, Top - oy);
             RenderMain(); Present();
@@ -2769,6 +2840,13 @@ namespace XyzRecorder
             // обычные сообщения гаснут сами через 7 с, предупреждения остаются
             if (!ui.StatusWarn && ui.Status.Length > 0 && state == St.Idle && !testing && (DateTime.Now - statusT).TotalSeconds > 7) ui.Status = "";
             ui.MicLive = live; ui.PeakDb = peakHold; ui.Clip = (DateTime.Now - clipT).TotalSeconds < 2.5;
+            // v16: угловые кнопки компакта — плавное появление/исчезание ~150 мс
+            {
+                float stp = (float)(dt / 0.15);
+                bool wl = compact && (corner == 1 || ui.Down == Hit.CMin), wr = compact && (corner == 2 || ui.Down == Hit.CClose);
+                ui.CornL = wl ? Math.Min(1f, ui.CornL + stp) : Math.Max(0f, ui.CornL - stp);
+                ui.CornR = wr ? Math.Min(1f, ui.CornR + stp) : Math.Max(0f, ui.CornR - stp);
+            }
             if (Visible && Alpha > 0)
             {
                 scope.Push(sbuf, avail, live && powered);
@@ -2879,13 +2957,15 @@ namespace XyzRecorder
         protected override void OnMouseMove(MouseEventArgs e)
         {
             var h = HitAt(e.Location);
+            corner = compact ? CompactView.CornerAt(s, e.Location) : 0;   // v16
+            if (h == Hit.CMin) corner = 1; else if (h == Hit.CClose) corner = 2;
             var hot = Interactive(h) && ui.IsEn(h) ? h : Hit.None;
             if (hot != ui.Hot) { ui.Hot = hot; Cursor = hot != Hit.None ? Cursors.Hand : Cursors.Default; }
             if (h == Hit.Screen && ui.Status.Length > 70 && !excl) { if (tip.GetToolTip(this) != ui.Status) tip.SetToolTip(this, ui.Status); }
             else if (tip.GetToolTip(this) != "") tip.SetToolTip(this, "");
             base.OnMouseMove(e);
         }
-        protected override void OnMouseLeave(EventArgs e) { ui.Hot = Hit.None; base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { ui.Hot = Hit.None; corner = 0; base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e)
         {
             var h = HitAt(e.Location);
@@ -2926,6 +3006,8 @@ namespace XyzRecorder
                 case Hit.CRec: StartRec(); break;
                 case Hit.CPause: TogglePause(); break;
                 case Hit.CStop: StopRec(); break;
+                case Hit.CMin: PowerOff(); break;     // v16: как «–» полного режима
+                case Hit.CClose: ExitApp(); break;    // v16: как «×» полного режима
             }
         }
         Point Px(float lx, float ly) { return new Point((int)Math.Round((lx + Lay.P) * s), (int)Math.Round((ly + Lay.P) * s)); }
@@ -3195,6 +3277,8 @@ namespace XyzRecorder
             ui.En[(int)Hit.Test] = idle && micOn && mics.Count > 0 && !testing;
             ui.En[(int)Hit.Min] = state != St.Saving;
             ui.En[(int)Hit.Close] = true;
+            ui.En[(int)Hit.CMin] = ui.En[(int)Hit.Min];         // v16: угловые кнопки компакта = «–»/«×»
+            ui.En[(int)Hit.CClose] = ui.En[(int)Hit.Close];
             ui.En[(int)Hit.Toggle] = state != St.Saving && powered;
             ui.En[(int)Hit.Skin] = powered;
             ui.En[(int)Hit.CRec] = ui.En[(int)Hit.PadRec];      // v11: кнопки компактного режима
@@ -3618,6 +3702,7 @@ namespace XyzRecorder
         public void SnapSkin(float k, float lever2) { ui.SkinK = k; ui.Lever2 = lever2; }
         public PlaqueForm Plaque { get { return ov; } }
         public void SnapCompact(bool on) { compact = on; ApplyLayout(); }
+        public void SnapCorner(float l, float r) { ui.CornL = l; ui.CornR = r; }   // v16
         public float SnapScale { get { return s; } }
         public Bitmap SnapMask()
         {
@@ -3768,6 +3853,13 @@ namespace XyzRecorder
                             Save(f.Snap(0, 1f, 1f, Hit.CStop, Hit.None, 0.28f, "", false, 10.0), dir, "c_hover_stop_idle" + suf + ".png");   // v14
                             Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.5f, "", false, 12.8125), dir, "c_rec" + suf + ".png");
                             Save(f.Snap(2, 1f, 1f, Hit.None, Hit.None, 0.12f, "", false, 12.8125), dir, "c_paused" + suf + ".png");
+                            // v16: угловые кнопки — наведение на «свернуть» (янтарь), на «закрыть» (красный), курсор в углу, полпути fade, покой
+                            f.SnapCorner(1f, 0f); Save(f.Snap(0, 1f, 1f, Hit.CMin, Hit.None, 0.28f, "", false, 10.0), dir, "c_corner_min" + suf + ".png");
+                            f.SnapCorner(0f, 1f); Save(f.Snap(0, 1f, 1f, Hit.CClose, Hit.None, 0.28f, "", false, 10.0), dir, "c_corner_close" + suf + ".png");
+                            f.SnapCorner(1f, 0f); Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "c_corner_zone_min" + suf + ".png");
+                            f.SnapCorner(0f, 1f); Save(f.Snap(1, 1f, 1f, Hit.CClose, Hit.None, 0.5f, "", false, 12.8125), dir, "c_corner_close_rec" + suf + ".png");
+                            f.SnapCorner(0f, 0.5f); Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "c_corner_fade" + suf + ".png");
+                            f.SnapCorner(0f, 0f); Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "c_corner_rest" + suf + ".png");
                             log.AppendLine("scale " + sc + ": " + CompactView.Info);
                             log.AppendLine("  хит-тест: " + CompactView.Report(sc));
                             if (sc == 1.25f) continue;
