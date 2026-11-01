@@ -1,4 +1,7 @@
-﻿// XYZ Запись v13 (01.11.2026): захват экрана — Desktop Duplication (ffmpeg lavfi ddagrab + hwdownload), окна с WDA_EXCLUDEFROMCAPTURE
+﻿// XYZ Запись v14 (01.11.2026): компактный режим — в полости «d» всегда видна красная точка (как на кнопке «Запись» прибора, ~43% полости:
+// покой — приглушённая ~55%, наведение — ярче, запись — пульсирует, пауза — тёмная), в полости «b» — скруглённый квадратик (как «Стоп», ~38%:
+// покой — приглушённый, наведение — светлее, нажатие — темнее). Знаки рисуются под эмблемой — буквы их не перекрывают и не меняются.
+// XYZ Запись v13 (01.11.2026): захват экрана — Desktop Duplication (ffmpeg lavfi ddagrab + hwdownload), окна с WDA_EXCLUDEFROMCAPTURE
 // (прибор, компакт, плашка, рамка области) в ролик не попадают; gdigrab (BitBlt) их не исключал. ddagrab не запустился — откат на gdigrab
 // и запись в журнал %APPDATA%\XYZ\recorder.log (туда же — результат SetWindowDisplayAffinity / GetWindowDisplayAffinity каждого окна).
 // Мини-осциллограф: геометрия v11 (таймер y=181, полоса уровня 80 px под ним), внутри — бегущая плавная волна справа налево
@@ -2004,6 +2007,8 @@ namespace XyzRecorder
             else if (st.Rec == 2) Cavity(g, 1, Theme.Red, 0.22f, ox, oy, s);
             else if (hotR && !dnR) Cavity(g, 1, Theme.Red, 0.32f, ox, oy, s);
             if (hotS && !dnS) Cavity(g, 3, Color.FromArgb(150, 170, 185), 0.28f, ox, oy, s);
+            // v14: знаки «Запись»/«Стоп» видны всегда; под эмблемой — буквы закрывают всё, что вне полостей
+            Marks(g, st, s, ox, oy, pulse, hotR, dnR, hotS, dnS);
             // эмблема 1:1; во время записи строка «BIM DESIGN» уступает место таймеру
             var band = new RectangleF((TextBand.X - X0) * s, (TextBand.Y - Y0) * s, TextBand.Width * s, TextBand.Height * s);
             // v12: в покое при включённом питании и контроле входа «BIM DESIGN» уступает место мини-осциллографу
@@ -2014,8 +2019,8 @@ namespace XyzRecorder
             if (st.Rec == 1) DrawS(g, 1, true, Theme.Red, (0.35f + 0.45f * pulse) * st.RecK, ox, oy);
             if (st.Rec == 2) { DrawS(g, 2, true, Theme.Amber, 0.55f + 0.35f * pulse, ox, oy); DrawS(g, 2, false, Theme.Amber, 0.62f + 0.2f * pulse, ox, oy); }
             if (hotP) { if (dnP) DrawS(g, 2, false, Color.Black, 0.42f, ox, oy); else { DrawS(g, 2, true, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 1.3f, ox, oy); DrawS(g, 2, false, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 0.22f, ox, oy); } }
-            if (hotR) { if (dnR) DrawS(g, 1, false, Color.Black, 0.45f, ox, oy); else { DrawS(g, 1, true, Theme.Red, 0.7f, ox, oy); Hint(g, 1, ox, oy, s, true); } }
-            if (hotS) { if (dnS) DrawS(g, 3, false, Color.Black, 0.45f, ox, oy); else { DrawS(g, 3, true, Theme.TealHi, 0.9f, ox, oy); Hint(g, 3, ox, oy, s, false); } }
+            if (hotR) { if (dnR) DrawS(g, 1, false, Color.Black, 0.45f, ox, oy); else DrawS(g, 1, true, Theme.Red, 0.7f, ox, oy); }
+            if (hotS) { if (dnS) DrawS(g, 3, false, Color.Black, 0.45f, ox, oy); else DrawS(g, 3, true, Theme.TealHi, 0.9f, ox, oy); }
             if (idleWave) MiniScope(g, s, mini, MYIdle, Theme.Teal, false, st.Power);   // v13
             // таймер и мини-осциллограф вместо «BIM DESIGN»
             if (st.Rec != 0)
@@ -2053,6 +2058,40 @@ namespace XyzRecorder
             using (var p = Theme.Round(lr, 1.5f * s)) using (var b = new SolidBrush(Theme.A(c, (dim ? 0.10f : 0.12f) * power))) g.FillPath(b, p);
             if (dim) mini.Draw(g, r, s, Theme.Mix(Theme.Amber, Color.Black, 0.18f), 0.62f);
             else mini.Draw(g, r, s, c, power);
+        }
+        // v14: постоянные знаки. Точка «Запись» — Theme.Red как на большой кнопке, квадрат «Стоп» — светло-серый с мятным оттенком.
+        static readonly Color StopC = Theme.Mix(Color.FromArgb(225, 232, 240), Theme.TealHi, 0.22f);
+        static void Marks(Graphics g, UiState st, float s, int ox, int oy, float pulse, bool hotR, bool dnR, bool hotS, bool dnS)
+        {
+            float pk = 0.7f + 0.3f * Math.Max(0f, Math.Min(1f, st.Power));   // питание выключено — ещё тише, но видно
+            float rb, rg; Color rcol = Theme.Red;
+            if (dnR) { rb = 0.42f; rg = 0.18f; }
+            else if (hotR) { rb = 1f; rg = 0.9f; rcol = Theme.Mix(Theme.Red, Color.White, 0.12f); }
+            else if (st.Rec == 1) { float k = Math.Max(0f, Math.Min(1f, st.RecK)); rb = 0.55f + (0.3f + 0.15f * pulse) * k; rg = 0.35f + (0.3f + 0.4f * pulse) * k; }
+            else if (st.Rec == 2) { rb = 0.30f; rg = 0.10f; }
+            else { rb = 0.55f; rg = 0.35f; }
+            if (!hotR && st.Rec != 1) { rb *= pk; rg *= pk; }
+            Mark(g, 1, ox, oy, s, true, Theme.Mix(rcol, Color.Black, 1f - rb), rg);
+            float sb, sg; Color scol = StopC;
+            if (dnS) { sb = 0.40f; sg = 0.08f; }
+            else if (hotS) { sb = 1f; sg = 0.9f; scol = Color.FromArgb(240, 246, 248); }
+            else { sb = 0.55f * pk; sg = 0.22f * pk; }
+            Mark(g, 3, ox, oy, s, false, Theme.Mix(scol, Color.Black, 1f - sb), sg);
+        }
+        static void Mark(Graphics g, int code, int ox, int oy, float s, bool dot, Color col, float glow)
+        {
+            var sh = shapes[code]; if (sh == null) return;
+            int dil = Math.Max(1, (int)Math.Round(2 * s));
+            float cav = Math.Min(sh.Box.Width, sh.Box.Height) - 2 * dil;   // размер самой полости (без расширения маски)
+            float d = cav * (dot ? 0.43f : 0.38f);
+            var c = new PointF(sh.C.X - ox + 0.5f, sh.C.Y - oy + 0.5f);
+            var r = new RectangleF(c.X - d / 2, c.Y - d / 2, d, d);
+            using (var p = dot ? new GraphicsPath() : Theme.Round(r, 2.2f * s))
+            {
+                if (dot) p.AddEllipse(r);
+                if (glow > 0.01f) Glow(g, p, col, s, glow);
+                using (var b = new SolidBrush(Theme.A(col, 0.97f))) g.FillPath(b, p);
+            }
         }
         // подсказки: красная точка в «d» (Запись), квадрат в «b» (Стоп)
         static void Hint(Graphics g, int code, int ox, int oy, float s, bool dot)
@@ -2436,7 +2475,7 @@ namespace XyzRecorder
     // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
     class AboutForm : Form
     {
-        public const string Version = "v13";
+        public const string Version = "v14";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -3788,6 +3827,7 @@ namespace XyzRecorder
                             Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.002f, "", false, 12.8125), dir, "c_rec_silence" + suf + ".png");   // v13
                             Save(f.Snap(0, 0f, 0f, Hit.None, Hit.None, 0f, "", false, 10.0), dir, "c_off" + suf + ".png");             // v12
                             Save(f.Snap(0, 1f, 1f, Hit.CRec, Hit.None, 0.28f, "", false, 10.0), dir, "c_hover_rec" + suf + ".png");
+                            Save(f.Snap(0, 1f, 1f, Hit.CStop, Hit.None, 0.28f, "", false, 10.0), dir, "c_hover_stop_idle" + suf + ".png");   // v14
                             Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.5f, "", false, 12.8125), dir, "c_rec" + suf + ".png");
                             Save(f.Snap(2, 1f, 1f, Hit.None, Hit.None, 0.12f, "", false, 12.8125), dir, "c_paused" + suf + ".png");
                             log.AppendLine("scale " + sc + ": " + CompactView.Info);
