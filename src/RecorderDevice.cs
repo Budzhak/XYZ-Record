@@ -1,4 +1,10 @@
-﻿// XYZ Запись v12 (01.11.2026): компактный режим — под буквами «db» мини-осциллограф (тот же источник сэмплов и свечение, что у большого;
+﻿// XYZ Запись v13 (01.11.2026): захват экрана — Desktop Duplication (ffmpeg lavfi ddagrab + hwdownload), окна с WDA_EXCLUDEFROMCAPTURE
+// (прибор, компакт, плашка, рамка области) в ролик не попадают; gdigrab (BitBlt) их не исключал. ddagrab не запустился — откат на gdigrab
+// и запись в журнал %APPDATA%\XYZ\recorder.log (туда же — результат SetWindowDisplayAffinity / GetWindowDisplayAffinity каждого окна).
+// Мини-осциллограф: геометрия v11 (таймер y=181, полоса уровня 80 px под ним), внутри — бегущая плавная волна справа налево
+// (несущая ≈4,5 горба на ширину под огибающей громкости), тишина — ровная линия; «BIM DESIGN» стирается по пикселям надписи
+// (свечение низа букв не срезается). Ключ проверки: --capturetest full|compact|plate|region <out.mp4> (показ 3 с + запись + сверка кадра).
+// XYZ Запись v12 (01.11.2026): компактный режим — под буквами «db» мини-осциллограф (тот же источник сэмплов и свечение, что у большого;
 // в покое при включённом питании и контроле входа — вместо «BIM DESIGN», в записи/паузе — под таймером вместо полоски уровня; пауза — янтарный).
 // XYZ Запись v11 (01.11.2026): компактный режим (плашка с эмблемой db, Запись — полость «d», Пауза — палочки «d»+«b», Стоп — полость «b»,
 // хит-тест по маске из PNG эмблемы; ini compact=1; двойной щелчок по эмблеме / меню «Компактный режим»), «Выбрать область…» (затемнение
@@ -54,7 +60,7 @@ namespace XyzRecorder
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr h, int id, uint mod, uint vk);
         [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr h, int id);
-        [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr h, uint a);
+        [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowDisplayAffinity(IntPtr h, uint a);
         [DllImport("user32.dll")] public static extern bool GetWindowDisplayAffinity(IntPtr h, out uint a);
         public delegate bool EnumProc(IntPtr h, IntPtr l);
         [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc p, IntPtr l);
@@ -99,6 +105,119 @@ namespace XyzRecorder
         {
             ReleaseCapture();
             SendMessage(f.Handle, 0xA1, (IntPtr)2, IntPtr.Zero);   // WM_NCLBUTTONDOWN, HTCAPTION
+        }
+    }
+
+    // ---------- v13: журнал %APPDATA%\XYZ\recorder.log ----------
+    static class AppLog
+    {
+        public static string PathLog { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "XYZ", "recorder.log"); } }
+        static readonly object lk = new object();
+        public static string Tag = "";
+        public static void W(string s)
+        {
+            try
+            {
+                lock (lk)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(PathLog));
+                    var fi = new FileInfo(PathLog);
+                    if (fi.Exists && fi.Length > 2000000) { try { File.Delete(PathLog + ".old"); } catch { } File.Move(PathLog, PathLog + ".old"); }
+                    File.AppendAllText(PathLog, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " [" + Process.GetCurrentProcess().Id + Tag + "] " + s + "\r\n", Encoding.UTF8);
+                }
+            }
+            catch { }
+        }
+        // SetWindowDisplayAffinity + проверка GetWindowDisplayAffinity; true — значение стоит.
+        public static bool Affinity(IntPtr h, uint want, string who)
+        {
+            if (h == IntPtr.Zero) { W("affinity " + who + ": нет окна"); return false; }
+            bool ok = Native.SetWindowDisplayAffinity(h, want);
+            int err = ok ? 0 : Marshal.GetLastWin32Error();
+            uint now = 0xFFFF; Native.GetWindowDisplayAffinity(h, out now);
+            bool good = ok && now == want;
+            W("affinity " + who + " hwnd=0x" + h.ToInt64().ToString("X") + ": Set(0x" + want.ToString("X") + ")=" + ok + (ok ? "" : " err=" + err) + ", Get=0x" + now.ToString("X") + (good ? "" : "  <-- НЕ СТОИТ"));
+            return good;
+        }
+        // Для layered-окна: если сразу не встало — повтор после показа/первого UpdateLayeredWindow (через очередь сообщений).
+        public static bool AffinityRetry(Form f, uint want, string who)
+        {
+            if (f == null || !f.IsHandleCreated) return false;
+            if (Affinity(f.Handle, want, who)) return true;
+            try { f.BeginInvoke(new Action(() => { try { var lf = f as LayeredForm; if (lf != null) lf.Present(); Affinity(f.Handle, want, who + " (повтор после показа)"); } catch { } })); } catch { }
+            return false;
+        }
+    }
+
+    // ---------- v13: выходы DXGI основного адаптера (ddagrab output_idx = номер выхода на адаптере 0) ----------
+    static class Dxgi
+    {
+        [ComImport, Guid("770aae78-f26f-4dba-a829-253c83d1b387"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IDXGIFactory1
+        {
+            void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent();
+            void EnumAdapters(); void MakeWindowAssociation(); void GetWindowAssociation(); void CreateSwapChain(); void CreateSoftwareAdapter();
+            [PreserveSig] int EnumAdapters1(uint idx, out IDXGIAdapter1 adapter);
+            [PreserveSig] int IsCurrent();
+        }
+        [ComImport, Guid("29038f61-3839-4626-91fd-086879011a05"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IDXGIAdapter1
+        {
+            void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent();
+            [PreserveSig] int EnumOutputs(uint idx, out IDXGIOutput output);
+            void GetDesc(); void CheckInterfaceSupport(); void GetDesc1();
+        }
+        [ComImport, Guid("ae02eedb-c735-4690-8d52-5a8dc20213aa"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IDXGIOutput
+        {
+            void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent();
+            [PreserveSig] int GetDesc(out OUTPUT_DESC desc);
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct OUTPUT_DESC
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+            public Native.RECT Desktop; public int Attached; public int Rotation; public IntPtr Monitor;
+        }
+        [DllImport("dxgi.dll")] static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr factory);
+
+        public class Output { public int Idx; public string Name; public Rectangle Bounds; public override string ToString() { return Idx + ":" + Name + " " + Bounds; } }
+        static List<Output> cached; static DateTime cachedT;
+        public static List<Output> Outputs(out string err)
+        {
+            err = null;
+            if (cached != null && (DateTime.Now - cachedT).TotalSeconds < 5) return cached;
+            var res = new List<Output>();
+            object fo = null, ao = null;
+            try
+            {
+                var iid = typeof(IDXGIFactory1).GUID; IntPtr pf;
+                int hr = CreateDXGIFactory1(ref iid, out pf);
+                if (hr != 0 || pf == IntPtr.Zero) { err = "CreateDXGIFactory1 hr=0x" + hr.ToString("X"); return res; }
+                fo = Marshal.GetObjectForIUnknown(pf); Marshal.Release(pf);
+                var f = (IDXGIFactory1)fo;
+                IDXGIAdapter1 a;
+                hr = f.EnumAdapters1(0, out a);
+                if (hr != 0 || a == null) { err = "EnumAdapters1(0) hr=0x" + hr.ToString("X"); return res; }
+                ao = a;
+                for (uint i = 0; i < 16; i++)
+                {
+                    IDXGIOutput o;
+                    if (a.EnumOutputs(i, out o) != 0 || o == null) break;
+                    OUTPUT_DESC d;
+                    if (o.GetDesc(out d) == 0)
+                        res.Add(new Output { Idx = (int)i, Name = d.DeviceName, Bounds = Rectangle.FromLTRB(d.Desktop.Left, d.Desktop.Top, d.Desktop.Right, d.Desktop.Bottom) });
+                    Marshal.ReleaseComObject(o);
+                }
+            }
+            catch (Exception ex) { err = "DXGI: " + ex.Message; }
+            finally
+            {
+                try { if (ao != null) Marshal.ReleaseComObject(ao); } catch { }
+                try { if (fo != null) Marshal.ReleaseComObject(fo); } catch { }
+            }
+            cached = res; cachedT = DateTime.Now;
+            return res;
         }
     }
 
@@ -276,6 +395,11 @@ namespace XyzRecorder
         public string MicName;           // обычное имя устройства (запасной вариант, если Alt не открылся)
         public List<string> Segments = new List<string>();
         public string LastError = "";
+        // v13: захват — Desktop Duplication (ddagrab), исключает окна с WDA_EXCLUDEFROMCAPTURE; gdigrab — запасной.
+        public bool PreferDda = true;
+        public static bool DdaBroken;      // ddagrab не запустился в этом сеансе — дальше сразу gdigrab
+        public string CapMode = "";        // "ddagrab" / "gdigrab" — чем пишется текущий сегмент
+        public Rectangle CapRect;          // что реально попадает в кадр (экранные физические координаты)
         Process proc; string curSeg;
         readonly object lk = new object();
         StringBuilder tail = new StringBuilder();
@@ -462,15 +586,79 @@ namespace XyzRecorder
 
         bool StartSegment1()
         {
-            Directory.CreateDirectory(WorkDir);
-            curSeg = Path.Combine(WorkDir, string.Format("seg_{0:000}.mkv", Segments.Count));
-            var a = new StringBuilder("-hide_banner -y -thread_queue_size 1024 -f gdigrab -framerate 15 -draw_mouse 1 ");
+            if (PreferDda && !DdaBroken)
+            {
+                string why;
+                string vin = DdaInput(out why);
+                if (vin != null)
+                {
+                    if (StartSegment2(vin, "ddagrab")) return true;
+                    string e1 = LastError;
+                    Log("ddagrab не запустился — пробую gdigrab");
+                    if (StartSegment2(GdiInput(), "gdigrab"))
+                    {
+                        DdaBroken = true;
+                        AppLog.W("ddagrab не запустился, запись идёт через gdigrab (прибор МОЖЕТ попасть в ролик): " + Short(e1));
+                        return true;
+                    }
+                    return false;
+                }
+                AppLog.W("ddagrab недоступен для области " + (Area.HasValue ? Area.Value.ToString() : "весь экран") + ": " + why + " — gdigrab");
+            }
+            return StartSegment2(GdiInput(), "gdigrab");
+        }
+        static string Short(string t) { t = (t ?? "").Replace("\r", " ").Replace("\n", " "); return t.Length > 400 ? t.Substring(t.Length - 400) : t; }
+
+        string GdiInput()
+        {
+            var a = new StringBuilder("-thread_queue_size 1024 -f gdigrab -framerate 15 -draw_mouse 1 ");
             if (Area.HasValue)
             {
                 var r = Area.Value;
                 a.AppendFormat("-offset_x {0} -offset_y {1} -video_size {2}x{3} ", r.X, r.Y, r.Width, r.Height);
+                CapRect = r;
             }
+            else CapRect = SystemInformation.VirtualScreen;
             a.Append("-i desktop ");
+            return a.ToString();
+        }
+
+        // v13: Desktop Duplication. Область/окно — offset и video_size относительно монитора (физические px, процесс DPI-aware);
+        // «Весь экран» — основной монитор. Монитор — выход DXGI адаптера 0 с наибольшим пересечением.
+        string DdaInput(out string why)
+        {
+            why = null;
+            Rectangle want = Area.HasValue ? Area.Value : Screen.PrimaryScreen.Bounds;
+            string err; var outs = Dxgi.Outputs(out err);
+            if (outs.Count == 0) { why = "выходы DXGI не найдены" + (err != null ? " (" + err + ")" : ""); return null; }
+            Dxgi.Output best = null; long bestA = 0;
+            foreach (var o in outs)
+            {
+                var i = Rectangle.Intersect(o.Bounds, want);
+                long ar = (long)Math.Max(0, i.Width) * Math.Max(0, i.Height);
+                if (ar > bestA) { bestA = ar; best = o; }
+            }
+            if (best == null) { why = "область вне мониторов основного адаптера (" + string.Join("; ", outs.ConvertAll(o => o.ToString()).ToArray()) + ")"; return null; }
+            var r = Rectangle.Intersect(best.Bounds, want);
+            r = new Rectangle(r.X, r.Y, r.Width & ~1, r.Height & ~1);
+            if (r.Width < 16 || r.Height < 16) { why = "область слишком мала"; return null; }
+            var sb = new StringBuilder("ddagrab=output_idx=" + best.Idx + ":framerate=15:draw_mouse=1");
+            if (r != best.Bounds)
+                sb.AppendFormat(":video_size={0}x{1}:offset_x={2}:offset_y={3}", r.Width, r.Height, r.X - best.Bounds.X, r.Y - best.Bounds.Y);
+            sb.Append(",hwdownload,format=bgra");
+            CapRect = r;
+            string info = "ddagrab: монитор " + best + ", кадр " + r + (r != want ? " (запрошено " + want + ", обрезано по монитору)" : "");
+            Log(info);
+            return "-thread_queue_size 1024 -f lavfi -i \"" + sb + "\" ";
+        }
+
+        bool StartSegment2(string videoIn, string mode)
+        {
+            Directory.CreateDirectory(WorkDir);
+            CapMode = mode;
+            curSeg = Path.Combine(WorkDir, string.Format("seg_{0:000}.mkv", Segments.Count));
+            var a = new StringBuilder("-hide_banner -y ");
+            a.Append(videoIn);
             bool mic = !string.IsNullOrEmpty(Mic);
             if (mic) a.Append("-thread_queue_size 1024 -f dshow -audio_buffer_size 50 -i audio=\"" + Mic + "\" ");
             a.Append("-map 0:v ");
@@ -493,7 +681,7 @@ namespace XyzRecorder
             var sw = Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 8000)
             {
-                if (started.WaitOne(50)) return true;
+                if (started.WaitOne(50)) { AppLog.W("сегмент " + Segments.Count + ": " + mode + ", кадр " + CapRect + (mic ? ", звук" : ", без звука")); return true; }
                 if (p.HasExited)
                 {
                     p.WaitForExit();
@@ -502,6 +690,7 @@ namespace XyzRecorder
                 }
                 Application.DoEvents();
             }
+            AppLog.W("сегмент " + Segments.Count + ": " + mode + " (строки Press [q] не было за 8 с, процесс жив)");
             return true; // не дождались строки, но процесс жив — считаем, что пишет
         }
 
@@ -1001,6 +1190,108 @@ namespace XyzRecorder
     }
 
     // ---------- Отрисовка прибора ----------
+    // ---------- v13: мини-осциллограф компактного режима — бегущая волна ----------
+    // Плавная несущая (≈4,5 горба на ширину полосы) под огибающей громкости; огибающая (история уровня по кадрам) и несущая
+    // движутся справа налево с одной скоростью — новые звуки входят справа. Тишина — ровная тонкая линия. Без зигзага по сэмплам.
+    class MiniWave
+    {
+        public float Speed = 34f;      // логических px в секунду
+        public float Humps = 4.5f;     // горбов несущей на ширину полосы
+        const int N = 512;
+        readonly float[] env = new float[N]; readonly double[] tm = new double[N];
+        int head = -1, count = 0; float lvl; double lastT;
+        public double Now { get { return lastT; } }
+        public void Reset() { head = -1; count = 0; lvl = 0f; }
+        public float Level { get { return lvl; } }
+
+        public void Push(float[] buf, int avail, bool live, double t)
+        {
+            float target = 0f;
+            if (live && buf != null && avail > 64)
+            {
+                int n = Math.Min(512, Math.Min(avail, buf.Length)), st = buf.Length - n; double ss = 0;
+                for (int i = st; i < buf.Length; i++) ss += (double)buf[i] * buf[i];
+                double db = 20 * Math.Log10(Math.Sqrt(ss / n) + 1e-9);
+                target = (float)Math.Max(0.0, Math.Min(1.0, (db + 52.0) / 32.0));   // −52 dBFS → 0, −20 dBFS → 1
+                if (target < 0.07f) target = 0f;
+            }
+            lvl += (target - lvl) * (target > lvl ? 0.3f : 0.12f);
+            if (lvl < 0.005f) lvl = 0f;
+            if (head >= 0 && t <= tm[head]) { env[head] = lvl; return; }
+            head = (head + 1) % N; env[head] = lvl; tm[head] = t; if (count < N) count++;
+            lastT = t;
+        }
+
+        float At(double t)
+        {
+            if (count == 0) return 0f;
+            for (int k = 0; k < count; k++)
+            {
+                int j = (head - k + N) % N;
+                if (tm[j] <= t)
+                {
+                    if (k == 0) return env[j];
+                    int jn = (j + 1) % N; double d = tm[jn] - tm[j];
+                    float f = d > 1e-6 ? (float)((t - tm[j]) / d) : 0f;
+                    return env[j] + (env[jn] - env[j]) * f;
+                }
+            }
+            return 0f;
+        }
+
+        // Точки кривой в прямоугольнике r (px устройства); шаг — 1 px.
+        public PointF[] Points(RectangleF r, float s)
+        {
+            float W = r.Width / s;
+            int n = Math.Max(8, (int)Math.Round(r.Width)) + 1;
+            var pts = new PointF[n];
+            float lam = W / Humps, amp = r.Height / 2f - 0.6f * s, mid = r.Y + r.Height / 2f;
+            double now = lastT, ph = now * Speed;
+            // огибающая по столбцам + двойное сглаживание окном ≈ полгорба: горбы мягкие, без «кочек»
+            var e = new float[n]; var e2 = new float[n];
+            for (int i = 0; i < n; i++) { float lx = W * i / (n - 1); e[i] = At(now - (W - lx) / Speed); }
+            int rad = Math.Max(1, (int)Math.Round(lam * 0.3f * s));
+            for (int pass = 0; pass < 2; pass++)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    float acc = 0f; int c = 0;
+                    for (int j = i - rad; j <= i + rad; j++) { int jj = j < 0 ? 0 : j >= n ? n - 1 : j; acc += e[jj]; c++; }
+                    e2[i] = acc / c;
+                }
+                var tmp = e; e = e2; e2 = tmp;
+            }
+            for (int i = 0; i < n; i++)
+            {
+                float lx = W * i / (n - 1);
+                float edge = Math.Min(1f, Math.Min(lx, W - lx) / 8f); edge = edge * edge * (3f - 2f * edge);
+                double v = Math.Sin(2 * Math.PI * (lx + ph) / lam);
+                pts[i] = new PointF(r.X + lx * s, mid - (float)(v * e[i] * edge * amp));
+            }
+            return pts;
+        }
+        public float MaxEnv(float W)
+        {
+            float m = 0f; for (float lx = 0; lx <= W; lx += 2f) m = Math.Max(m, At(lastT - (W - lx) / Speed)); return m;
+        }
+
+        // c — цвет (запись — бирюза, пауза — приглушённый янтарь), k — яркость.
+        public void Draw(Graphics g, RectangleF r, float s, Color c, float k)
+        {
+            var pts = Points(r, s);
+            float me = MaxEnv(r.Width / s);
+            var sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
+            float gk = 0.35f + 0.65f * me;   // в тишине свечение почти гаснет — остаётся тонкая линия
+            float[] wd = { 4.6f, 2.6f }; float[] ga = { 0.09f, 0.2f };
+            for (int i = 0; i < 2; i++)
+                using (var pen = new Pen(Theme.A(c, ga[i] * k * gk), wd[i] * s) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round })
+                    g.DrawLines(pen, pts);
+            using (var pen = new Pen(Theme.A(Theme.Mix(c, Color.White, 0.22f), (0.55f + 0.4f * Math.Min(1f, me * 2f)) * k), 1.15f * s) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round })
+                g.DrawLines(pen, pts);
+            g.SmoothingMode = sm;
+        }
+    }
+
     static class DeviceView
     {
         static RectangleF R(RectangleF r, float s) { return new RectangleF((r.X + Lay.P) * s, (r.Y + Lay.P) * s, r.Width * s, r.Height * s); }
@@ -1461,9 +1752,36 @@ namespace XyzRecorder
         public static readonly RectangleF TextBand = new RectangleF(40, 171, 152, 15);  // строка «BIM DESIGN» эмблемы (холст)
         public static readonly RectangleF EmbLp = new RectangleF(26, 17, 143, 147);     // эмблема в координатах корпуса (двойной щелчок)
         public const float CX = 115.5f;                                                 // середина букв по X (холст)
-        // v12: мини-осциллограф (холст): ширина ~ как «BIM DESIGN» с запасом (≈58% плашки), высота 15 px @1x;
-        // в покое — на месте «BIM DESIGN» (буквы кончаются на y=169), в записи — под таймером (низ плашки 204).
-        public const float MW = 104, MH = 15, MYIdle = 172, MYRec = 186;
+        // v13: мини-осциллограф = полоса уровня v11 (80 px по X, ось y=194,5 — под таймером v11 y=181; волна ±5 px);
+        // в покое при включённом питании — та же полоса на месте «BIM DESIGN» (ось y=178,5 — середина строки надписи).
+        public const float MW = 80, MH = 11, MYIdle = 178.5f, MYRec = 194.5f;
+        static Bitmap embNT; static float embNTs = -1f;
+        // Эмблема без надписи «BIM DESIGN»: стираются только бирюзовые пиксели надписи (G−R > 55) в строке надписи;
+        // беловатое свечение низа букв «db» остаётся — горизонтального среза нет.
+        static Bitmap EmblemNoText(float s)
+        {
+            var em = Res.Get("emblem", s); if (em == null) return null;
+            if (embNT != null && Math.Abs(embNTs - s) < 0.0001f) return embNT;
+            if (embNT != null) { embNT.Dispose(); embNT = null; }
+            var b = new Bitmap(em.Width, em.Height, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(b)) { g.CompositingMode = CompositingMode.SourceCopy; g.DrawImage(em, new Rectangle(0, 0, em.Width, em.Height), 0, 0, em.Width, em.Height, GraphicsUnit.Pixel); }
+            var r = Rectangle.Intersect(Rectangle.Round(new RectangleF(TextBand.X * s, (TextBand.Y - 2) * s, TextBand.Width * s, (TextBand.Height + 4) * s)), new Rectangle(0, 0, b.Width, b.Height));
+            var d = b.LockBits(r, ImageLockMode.ReadWrite, PixelFormat.Format32bppPArgb);
+            var row = new int[r.Width];
+            for (int y = 0; y < r.Height; y++)
+            {
+                Marshal.Copy(d.Scan0 + y * d.Stride, row, 0, r.Width);
+                for (int x = 0; x < r.Width; x++)
+                {
+                    int px = row[x], a = (px >> 24) & 255, rr = (px >> 16) & 255, gg = (px >> 8) & 255;
+                    if (a > 0 && (gg - rr) * 255 > 55 * a) row[x] = 0;
+                }
+                Marshal.Copy(row, 0, d.Scan0 + y * d.Stride, r.Width);
+            }
+            b.UnlockBits(d);
+            embNT = b; embNTs = s;
+            return b;
+        }
 
         class Shape { public Bitmap Fill, Glow; public Rectangle Box; public Point GlowOff; public PointF C; }
         static float ms = -1f; static byte[] map; static int mw, mh;
@@ -1652,7 +1970,7 @@ namespace XyzRecorder
         }
 
         public static void Render(Graphics g, float s, UiState st) { Render(g, s, st, null); }
-        public static void Render(Graphics g, float s, UiState st, Scope mini)
+        public static void Render(Graphics g, float s, UiState st, MiniWave mini)
         {
             Ensure(s);
             g.CompositingMode = CompositingMode.SourceCopy; g.Clear(Color.Transparent); g.CompositingMode = CompositingMode.SourceOver;
@@ -1690,20 +2008,19 @@ namespace XyzRecorder
             var band = new RectangleF((TextBand.X - X0) * s, (TextBand.Y - Y0) * s, TextBand.Width * s, TextBand.Height * s);
             // v12: в покое при включённом питании и контроле входа «BIM DESIGN» уступает место мини-осциллографу
             bool idleWave = mini != null && st.Rec == 0 && st.Power > 0.5f && st.MicLive;
-            if (st.Rec != 0 || idleWave) g.SetClip(band, CombineMode.Exclude);
-            Res.Draw(g, Res.Get("emblem", s), -ox, -oy, 1f);
-            g.ResetClip();
+            // v13: надпись стирается по пикселям (не прямоугольником) — свечение низа букв не срезается
+            Res.Draw(g, (st.Rec != 0 || idleWave) ? EmblemNoText(s) : Res.Get("emblem", s), -ox, -oy, 1f);
             // над эмблемой: свечение, нажатие, подсказки
             if (st.Rec == 1) DrawS(g, 1, true, Theme.Red, (0.35f + 0.45f * pulse) * st.RecK, ox, oy);
             if (st.Rec == 2) { DrawS(g, 2, true, Theme.Amber, 0.55f + 0.35f * pulse, ox, oy); DrawS(g, 2, false, Theme.Amber, 0.62f + 0.2f * pulse, ox, oy); }
             if (hotP) { if (dnP) DrawS(g, 2, false, Color.Black, 0.42f, ox, oy); else { DrawS(g, 2, true, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 1.3f, ox, oy); DrawS(g, 2, false, st.Rec == 2 ? Theme.Amber : Theme.TealHi, 0.22f, ox, oy); } }
             if (hotR) { if (dnR) DrawS(g, 1, false, Color.Black, 0.45f, ox, oy); else { DrawS(g, 1, true, Theme.Red, 0.7f, ox, oy); Hint(g, 1, ox, oy, s, true); } }
             if (hotS) { if (dnS) DrawS(g, 3, false, Color.Black, 0.45f, ox, oy); else { DrawS(g, 3, true, Theme.TealHi, 0.9f, ox, oy); Hint(g, 3, ox, oy, s, false); } }
-            if (idleWave) MiniScope(g, s, mini, MYIdle, Theme.Teal, false, st.Power);
+            if (idleWave) MiniScope(g, s, mini, MYIdle, Theme.Teal, false, st.Power);   // v13
             // таймер и мини-осциллограф вместо «BIM DESIGN»
             if (st.Rec != 0)
             {
-                float cx = (CX - X0) * s, cy = ((st.Rec == 3 ? 181f : 178.5f) - Y0) * s;
+                float cx = (CX - X0) * s, cy = (181f - Y0) * s;   // v13: таймер на месте v11
                 Color tc = st.Rec == 1 ? Theme.Mix(Theme.Teal, Theme.Red, st.RecK) : st.Rec == 2 ? Theme.Amber : Theme.Teal;
                 if (st.Rec == 3)
                 {
@@ -1718,8 +2035,8 @@ namespace XyzRecorder
                     using (var path = new GraphicsPath())
                     using (var sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     {
-                        path.AddString(st.Timer, Theme.DigitFam, (int)FontStyle.Regular, 15f * s, new RectangleF(cx - 90 * s, cy - 14 * s, 180 * s, 28 * s), sf);
-                        Glow(g, path, tc, s, 0.55f * ta);
+                        path.AddString(st.Timer, Theme.DigitFam, (int)FontStyle.Regular, 16f * s, new RectangleF(cx - 90 * s, cy - 14 * s, 180 * s, 28 * s), sf);
+                        Glow(g, path, tc, s, 0.8f * ta);
                         using (var b = new SolidBrush(Theme.A(Theme.Mix(tc, Color.White, 0.15f), ta))) g.FillPath(b, path);
                     }
                 }
@@ -1727,20 +2044,15 @@ namespace XyzRecorder
                     MiniScope(g, s, mini, MYRec, st.Rec == 2 ? Theme.Amber : Theme.Teal, st.Rec == 2, 1f);
             }
         }
-        // v12: мини-осциллограф — полоса без рамки, всё обрезано по полосе (буквы и таймер не задевает);
-        // тонкая центральная линия видна всегда (при тишине — только она).
-        static void MiniScope(Graphics g, float s, Scope mini, float y0, Color c, bool dim, float power)
+        // v13: мини-осциллограф — дорожка полосы уровня v11 (80×3, приглушённая) и бегущая волна по её оси.
+        static void MiniScope(Graphics g, float s, MiniWave mini, float yc, Color c, bool dim, float power)
         {
-            float x = (CX - MW / 2 - X0) * s, y = (y0 - Y0) * s;
-            var r = new RectangleF(x, y, (float)Math.Round(MW * s), (float)Math.Round(MH * s));
-            var gs = g.Save();
-            g.SetClip(r);
-            float mid = y + (float)Math.Round(MH * s) / 2f;
-            using (var pen = new Pen(Theme.A(c, (dim ? 0.18f : 0.22f) * power), Math.Max(1f, 0.8f * s)))
-                g.DrawLine(pen, x + 1 * s, mid, x + r.Width - 1 * s, mid);
-            if (dim) mini.DrawTint(g, x, y, Theme.Mix(Theme.Amber, Color.Black, 0.18f), 0.62f);
-            else mini.Draw(g, x, y, power);
-            g.Restore(gs);
+            float x = (CX - MW / 2 - X0) * s, y = (yc - MH / 2 - Y0) * s;
+            var r = new RectangleF(x, y, MW * s, MH * s);
+            var lr = new RectangleF(x, (yc - 1.5f - Y0) * s, MW * s, 3 * s);
+            using (var p = Theme.Round(lr, 1.5f * s)) using (var b = new SolidBrush(Theme.A(c, (dim ? 0.10f : 0.12f) * power))) g.FillPath(b, p);
+            if (dim) mini.Draw(g, r, s, Theme.Mix(Theme.Amber, Color.Black, 0.18f), 0.62f);
+            else mini.Draw(g, r, s, c, power);
         }
         // подсказки: красная точка в «d» (Запись), квадрат в «b» (Стоп)
         static void Hint(Graphics g, int code, int ox, int oy, float s, bool dot)
@@ -1935,8 +2247,8 @@ namespace XyzRecorder
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            AffinityOk = Native.SetWindowDisplayAffinity(Handle, Native.WDA_EXCLUDEFROMCAPTURE);
             Present();
+            AffinityOk = AppLog.Affinity(Handle, Native.WDA_EXCLUDEFROMCAPTURE, "плашка (создание)");   // v13: с проверкой и журналом
         }
         public void Render(UiState main, float[] buf, int avail)
         {
@@ -2094,7 +2406,7 @@ namespace XyzRecorder
         public RegionFrame() { ShowInTaskbar = false; TopMost = true; Text = "XYZ Запись — рамка области"; }
         protected override bool ShowWithoutActivation { get { return true; } }
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x08000000 | 0x8 | 0x20; return cp; } }   // TOOLWINDOW | NOACTIVATE | TOPMOST | TRANSPARENT
-        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); AffinityOk = Native.SetWindowDisplayAffinity(Handle, Native.WDA_EXCLUDEFROMCAPTURE); }
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); AffinityOk = AppLog.Affinity(Handle, Native.WDA_EXCLUDEFROMCAPTURE, "рамка области (создание)"); }
         public void Place(Rectangle area)
         {
             var b = Rectangle.Inflate(area, T, T);
@@ -2124,7 +2436,7 @@ namespace XyzRecorder
     // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
     class AboutForm : Form
     {
-        public const string Version = "v12";
+        public const string Version = "v13";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -2252,7 +2564,7 @@ namespace XyzRecorder
         float s;
         UiState ui = new UiState();
         Scope scope = new Scope();
-        Scope mini = new Scope { Pad = 1.5f, GlowK = 0.5f, Gain = 3.2f };   // v12: мини-осциллограф компактного режима
+        MiniWave mini = new MiniWave();   // v13: мини-осциллограф компактного режима — бегущая волна
         MicMeter mm = new MicMeter();
         float[] sbuf = new float[2048];
         List<AreaItem> areas = new List<AreaItem>(); AreaItem area;
@@ -2297,6 +2609,19 @@ namespace XyzRecorder
             micOn = cfg.Get("micOn", "1") == "1";
             voiceOn = cfg.Get("voice", "1") == "1";
             showInRec = cfg.Get("showInRec", "0") == "1";
+            // v13: у db стояло «Показывать прибор в записи» = ВКЛ — из-за этого прибор попадал в ролики. Один раз при первом запуске v13
+            // галочка выключается (вернуть можно в меню корпуса); событие — в журнал.
+            if (!Settings.ReadOnly && cfg.Get("v13", "") != "1")
+            {
+                cfg.Set("v13", "1");
+                if (showInRec)
+                {
+                    showInRec = false; cfg.Set("showInRec", "0");
+                    AppLog.W("v13: «Показывать прибор в записи» было ВКЛ — выключено, прибор и плашка больше не попадают в запись");
+                    SetStatus("Прибор скрыт из записи (вернуть: меню → «Показывать прибор в записи»).", false);
+                }
+                cfg.Save();
+            }
             foldRec = cfg.Get("foldRec", "0") == "1";
             skinFrame = cfg.Get("skin", "body") == "frame";
             ui.SkinK = skinFrame ? 1f : 0f; ui.Lever2 = skinFrame ? 0f : 1f;
@@ -2350,7 +2675,6 @@ namespace XyzRecorder
         {
             if (compact) EnsureFrame((int)Math.Round(CompactView.W * s), (int)Math.Round(CompactView.H * s));
             else EnsureFrame((int)Math.Round(Lay.CW * s), (int)Math.Round(Lay.CH * s));
-            mini.Ensure((int)Math.Round(CompactView.MW * s), (int)Math.Round(CompactView.MH * s), s);   // v12
         }
         // Эмблема остаётся на месте: окно сдвигается на начало вырезки холста.
         void SetCompact(bool on)
@@ -2415,6 +2739,7 @@ namespace XyzRecorder
                 IntPtr h = m.Handle;
                 Native.SetWindowDisplayAffinity(h, ex ? Native.WDA_EXCLUDEFROMCAPTURE : 0u);
                 Native.GetWindowDisplayAffinity(h, out a);
+                if (ex && a != Native.WDA_EXCLUDEFROMCAPTURE) AppLog.W("affinity меню: Get=0x" + a.ToString("X") + "  <-- НЕ СТОИТ");
             }
             catch { }
             return a;
@@ -2429,13 +2754,13 @@ namespace XyzRecorder
             bool ok = false; uint now = 0;
             if (IsHandleCreated)
             {
-                ok = Native.SetWindowDisplayAffinity(Handle, want);
+                ok = AppLog.AffinityRetry(this, want, compact ? "прибор (компакт)" : "прибор (полный)");   // v13: с проверкой, журналом и повтором
                 Native.GetWindowDisplayAffinity(Handle, out now);
             }
             LastAff = now;
             exclFail = excl && (!ok || now != want);
             if (ov != null && ov.IsHandleCreated)
-                Native.SetWindowDisplayAffinity(ov.Handle, rec && showInRec ? 0u : Native.WDA_EXCLUDEFROMCAPTURE);
+                AppLog.Affinity(ov.Handle, rec && showInRec ? 0u : Native.WDA_EXCLUDEFROMCAPTURE, "плашка");
         }
 
         // ---------- кадр ----------
@@ -2464,7 +2789,7 @@ namespace XyzRecorder
             if (Visible && Alpha > 0)
             {
                 scope.Push(sbuf, avail, live && powered);
-                if (compact) mini.Push(sbuf, avail, live && powered);   // v12: тот же источник, та же частота кадров
+                if (compact) mini.Push(sbuf, avail, live && powered, now);   // v13: тот же источник, та же частота кадров
                 RenderMain();
                 Present();
             }
@@ -2760,11 +3085,12 @@ namespace XyzRecorder
         }
         void ShowRegionFrame()
         {
-            if (area == null || area.Kind != 3 || Program.SelfTestMode) return;
+            if (area == null || area.Kind != 3 || (Program.SelfTestMode && !Program.CaptureTestMode)) return;
             try
             {
                 if (rframe == null) rframe = new RegionFrame();
                 rframe.Place(capRect); rframe.SetColor(false); rframe.Show(); rframe.SetColor(false);
+                AppLog.AffinityRetry(rframe, Native.WDA_EXCLUDEFROMCAPTURE, "рамка области (показ)");   // v13
             }
             catch { }
         }
@@ -2809,7 +3135,7 @@ namespace XyzRecorder
             string keep = area != null ? area.Key : cfg.Get("area", "full");
             areas.Clear();
             var scr = Screen.AllScreens;
-            areas.Add(new AreaItem { Kind = 0, Key = "full", Text = scr.Length > 1 ? "Весь экран (все мониторы)" : "Весь экран" });
+            areas.Add(new AreaItem { Kind = 0, Key = "full", Text = scr.Length > 1 ? "Весь экран (основной монитор)" : "Весь экран" });   // v13: ddagrab пишет один монитор
             if (scr.Length > 1)
                 for (int i = 0; i < scr.Length; i++)
                     areas.Add(new AreaItem { Kind = 1, Mon = i, Key = "mon:" + i,
@@ -3007,6 +3333,7 @@ namespace XyzRecorder
             if (pos.HasValue)
             {
                 ov.Location = pos.Value; ov.Render(ui, null, 0); ov.Present(); ov.Show(); ovShown = true; Hide();
+                AppLog.AffinityRetry(ov, showInRec ? 0u : Native.WDA_EXCLUDEFROMCAPTURE, "плашка (показ)");   // v13
             }
             else { ovShown = false; Hide(); }   // плашку некуда деть так, чтобы она не попала в запись — работаем из трея (F9)
             if (!frame.Enabled) frame.Start();
@@ -3044,6 +3371,7 @@ namespace XyzRecorder
                 starting = true; UpdateButtons();
                 if (!frame.Enabled) frame.Start();
             }
+            AppLog.W("старт записи: область «" + (area != null ? area.Text : "весь экран") + "», showInRec=" + (showInRec ? 1 : 0) + ", foldRec=" + (foldRec ? 1 : 0) + ", compact=" + (compact ? 1 : 0) + ", звук=" + (eng.Mic != null ? "да" : "нет"));
             Application.DoEvents();
             bool started = eng.StartSegment();
             string micWarn = null;
@@ -3219,6 +3547,43 @@ namespace XyzRecorder
         public string StatusText { get { return ui.Status; } }
         public float RecK { get { return ui.RecK; } }
 
+        // ---------- v13: --capturetest — прибор в правом нижнем углу основного монитора, настоящий StartRec/StopRec ----------
+        public string CtMode = "";
+        public void CtPrep(string mode, string outDir)
+        {
+            CtMode = mode;
+            RefreshAreas(); area = areas[0];
+            micOn = false; voiceOn = false; showInRec = false;
+            foldRec = mode == "plate";
+            outDirOverride = outDir; TopMost = true;
+            compact = mode == "compact" || mode == "region"; ApplyLayout();
+            var wa = Screen.PrimaryScreen.WorkingArea; int m = (int)(8 * s);
+            Location = new Point(wa.Right - FW - m, wa.Bottom - FH - m);
+            if (mode == "plate") exiting = true;   // после «Стоп» главное окно не показывать
+            if (mode == "region")
+            {
+                var r = Rectangle.Inflate(new Rectangle(Location, Size), (int)(140 * s), (int)(110 * s));
+                r = RegionPicker.EvenRect(Rectangle.Intersect(r, Screen.PrimaryScreen.Bounds));
+                area = new AreaItem { Kind = 3, Key = "region", Rect = r, Text = "Область (проверка)", Short = string.Format("Область {0}×{1}", r.Width, r.Height) };
+            }
+            UpdateButtons();
+        }
+        // Прямоугольник, где окажется прибор (для плашки — место из ShowOverlay).
+        public Rectangle CtDeviceRect()
+        {
+            if (CtMode == "plate")
+            {
+                var wa = Screen.PrimaryScreen.WorkingArea; int m = (int)(4 * s);
+                return new Rectangle(wa.Right - ov.Width - m, wa.Bottom - ov.Height - m, ov.Width, ov.Height);
+            }
+            return new Rectangle(Location, Size);
+        }
+        public Bitmap CtDeviceFrame() { return CtMode == "plate" ? ov.CopyFrame() : CopyFrame(); }
+        public Engine CtEngine { get { return eng; } }
+        public IntPtr CtOvHandle { get { return ov != null && ov.IsHandleCreated ? ov.Handle : IntPtr.Zero; } }
+        public IntPtr CtFrameHandle { get { return rframe != null && rframe.IsHandleCreated ? rframe.Handle : IntPtr.Zero; } }
+        public bool CtFrameVisible { get { return rframe != null && rframe.Visible; } }
+
         // ---------- для --snapshot: кадры без показа окна ----------
         public float SnapRecK = 1f;
         public void SnapPrep()
@@ -3242,7 +3607,14 @@ namespace XyzRecorder
             {
                 Synth.Fill(buf, t - 0.033 * (7 - i), amp);
                 scope.Push(buf, amp > 0 ? buf.Length : 0, amp > 0 && power > 0.5f);
-                mini.Push(buf, amp > 0 ? buf.Length : 0, amp > 0 && power > 0.5f);
+            }
+            mini.Reset();
+            // v13: мини-волне нужна история ~2,5 с (полоса проходит за 80/34 с): 80 кадров синтетического голоса со слогами
+            for (int i = 0; i < 80; i++)
+            {
+                double ti = t - 0.033 * (79 - i);
+                Synth.Fill(buf, ti, amp * (float)Math.Max(0.0, Math.Sin(2 * Math.PI * 1.7 * ti + 0.9)));
+                mini.Push(buf, amp > 0 ? buf.Length : 0, amp > 0 && power > 0.5f, ti);
             }
             RenderMain();
             Log += string.Format("frame st={0} lever={1:0.00}: {2} ms\r\n", st, lever, sw2.ElapsedMilliseconds / 8.0);
@@ -3289,6 +3661,7 @@ namespace XyzRecorder
     static class Program
     {
         public static bool SnapshotMode;
+        public static bool CaptureTestMode;   // v13
 
         [STAThread]
         static int Main(string[] args)
@@ -3308,6 +3681,7 @@ namespace XyzRecorder
                 if (k == "--snapshot-about") return Snapshot11("about");
                 if (k == "--snapshot-region") return Snapshot11("region");
                 if (k == "--regiontest") return RegionTest(i + 1 < args.Length ? args[i + 1] : "100,100,640,360");
+                if (k == "--capturetest") return CaptureTest(i + 1 < args.Length ? args[i + 1].Trim().ToLower() : "full", i + 2 < args.Length ? args[i + 2] : null);   // v13
             }
             try { var ct = new Thread(() => Engine.CleanRaw(7)); ct.IsBackground = true; ct.Start(); } catch { }   // v11
             bool created;
@@ -3410,7 +3784,8 @@ namespace XyzRecorder
                             string suf = sc == 1f ? "" : sc == 2f ? "@2x" : "@125";
                             f.SnapRecK = 1f;
                             Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, "c_idle" + suf + ".png");
-                            Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0f, "", false, 10.0), dir, "c_idle_silence" + suf + ".png");   // v12
+                            Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.002f, "", false, 10.0), dir, "c_idle_silence" + suf + ".png");   // v13: вход жив, тишина
+                            Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.002f, "", false, 12.8125), dir, "c_rec_silence" + suf + ".png");   // v13
                             Save(f.Snap(0, 0f, 0f, Hit.None, Hit.None, 0f, "", false, 10.0), dir, "c_off" + suf + ".png");             // v12
                             Save(f.Snap(0, 1f, 1f, Hit.CRec, Hit.None, 0.28f, "", false, 10.0), dir, "c_hover_rec" + suf + ".png");
                             Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.5f, "", false, 12.8125), dir, "c_rec" + suf + ".png");
@@ -3797,6 +4172,106 @@ namespace XyzRecorder
             }
             catch (Exception ex) { W("FAIL исключение: " + ex); }
             return pass ? 0 : 1;
+        }
+
+        // ---------- v13: --capturetest full|compact|plate|region <out.mp4> ----------
+        // Показывает прибор (режим mode) в правом нижнем углу основного монитора, пишет ~3 с тем же модулем захвата (StartRec/StopRec,
+        // без звука), закрывается. Рядом с out.mp4: out.png (кадр 2 с), out_desk.png (под прибором до показа), out_crop.png (место прибора
+        // в кадре), out_dev.png (прибор, как его видит db), out_cmp.png (сводка), out.log, out_ffmpeg.log. Код 0 — в кадре прибора нет.
+        static int CaptureTest(string mode, string outMp4)
+        {
+            if (mode != "full" && mode != "compact" && mode != "plate" && mode != "region") mode = "full";
+            if (string.IsNullOrEmpty(outMp4)) outMp4 = Path.Combine(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test"), "capture_" + mode + ".mp4");
+            outMp4 = Path.GetFullPath(outMp4);
+            string dir = Path.GetDirectoryName(outMp4), bn = Path.Combine(dir, Path.GetFileNameWithoutExtension(outMp4));
+            Directory.CreateDirectory(dir);
+            var log = new StringBuilder();
+            Action<string> W = x => { log.AppendLine(x); try { File.WriteAllText(bn + ".log", log.ToString(), Encoding.UTF8); } catch { } };
+            StLogger = W;
+            SelfTestMode = true; CaptureTestMode = true; Settings.ReadOnly = true; AppLog.Tag = " capturetest " + mode;
+            var IC = System.Globalization.CultureInfo.InvariantCulture;
+            int code = 1;
+            try
+            {
+                W("capturetest " + mode + " " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + ", DPI k=" + Theme.K + ", мониторов " + Screen.AllScreens.Length + ", основной " + Screen.PrimaryScreen.Bounds);
+                string derr; var outs = Dxgi.Outputs(out derr);
+                W("DXGI адаптер 0: " + string.Join("; ", outs.ConvertAll(o => o.ToString()).ToArray()) + (derr != null ? " (" + derr + ")" : ""));
+                string ff = Engine.FindFfmpeg(); W("ffmpeg: " + ff);
+                if (ff == null) { W("FAIL: нет ffmpeg"); return 2; }
+                string tmpOut = Path.Combine(Path.GetTempPath(), "xyz_capturetest_" + DateTime.Now.ToString("HHmmss"));
+                Directory.CreateDirectory(tmpOut);
+                using (var f = new MainForm())
+                {
+                    f.CtPrep(mode, tmpOut);
+                    var dr = Rectangle.Intersect(f.CtDeviceRect(), SystemInformation.VirtualScreen);
+                    W("Место прибора: " + dr);
+                    var desk0 = Grab(dr);                       // что под прибором до показа
+                    if (mode != "plate") { f.StShow(); Pump(500); }
+                    Bitmap dev = null; uint aMain = 0xFFFF, aOv = 0xFFFF, aFr = 0xFFFF; string capMode = ""; Rectangle capR = Rectangle.Empty; bool frVis = false;
+                    W("Запись 3 с…");
+                    string mp = RecordOnce(f, 3000, () =>
+                    {
+                        Pump(300);
+                        dev = f.CtDeviceFrame();
+                        Native.GetWindowDisplayAffinity(f.Handle, out aMain);
+                        if (f.CtOvHandle != IntPtr.Zero) Native.GetWindowDisplayAffinity(f.CtOvHandle, out aOv);
+                        if (f.CtFrameHandle != IntPtr.Zero) Native.GetWindowDisplayAffinity(f.CtFrameHandle, out aFr);
+                        frVis = f.CtFrameVisible;
+                        capMode = f.CtEngine.CapMode; capR = f.CtEngine.CapRect;
+                    });
+                    f.Hide();
+                    W("  захват: " + capMode + ", кадр (экран) " + capR + ", ролик " + mp);
+                    W("  affinity во время записи: прибор=0x" + aMain.ToString("X") + (mode == "plate" ? " (скрыт)" : "") + ", плашка=0x" + aOv.ToString("X") + (mode == "region" ? ", рамка области=0x" + aFr.ToString("X") + " видна=" + frVis : ""));
+                    try { var wd = f.CtEngine.WorkDir; if (wd != null && File.Exists(Path.Combine(wd, "ffmpeg.log"))) File.Copy(Path.Combine(wd, "ffmpeg.log"), bn + "_ffmpeg.log", true); } catch { }
+                    if (mp == null || !File.Exists(mp)) { W("FAIL: ролик не записан"); return 3; }
+                    File.Copy(mp, outMp4, true);
+                    try { File.Delete(mp); Directory.Delete(tmpOut, true); } catch { }
+                    var fr = FrameAt(ff, outMp4, 2.0, bn + ".png");
+                    if (fr == null || dev == null) { W("FAIL: нет кадра"); return 4; }
+                    W("Кадр mp4: " + fr.Width + "×" + fr.Height);
+                    // место прибора в кадре: кадр начинается в capR.Location (масштаб 1:1, чётные размеры)
+                    var cr = new Rectangle(dr.X - capR.X, dr.Y - capR.Y, dr.Width, dr.Height);
+                    var crIn = Rectangle.Intersect(cr, new Rectangle(0, 0, fr.Width, fr.Height));
+                    if (crIn.Width != dr.Width || crIn.Height != dr.Height) W("  ВНИМАНИЕ: прибор частично вне кадра: " + cr + " ∩ кадр = " + crIn);
+                    var crop = new Bitmap(dr.Width, dr.Height, PixelFormat.Format32bppArgb);
+                    using (var g = Graphics.FromImage(crop)) { g.Clear(Color.Magenta); g.DrawImage(fr, new Rectangle(crIn.X - cr.X, crIn.Y - cr.Y, crIn.Width, crIn.Height), crIn, GraphicsUnit.Pixel); }
+                    var devR = new Bitmap(dr.Width, dr.Height, PixelFormat.Format32bppArgb);
+                    var full = f.CtDeviceRect();
+                    using (var g = Graphics.FromImage(devR)) g.DrawImage(dev, new Rectangle(0, 0, dr.Width, dr.Height), dr.X - full.X, dr.Y - full.Y, dr.Width, dr.Height, GraphicsUnit.Pixel);
+                    var expVis = Over(desk0, devR);
+                    int[] mask = Px(devR);
+                    double dDesk = Diff(Px(crop), Px(desk0), mask), dDev = Diff(Px(crop), Px(expVis), mask);
+                    long nm = 0; foreach (int v in mask) if (((v >> 24) & 255) >= 250) nm++;
+                    W(string.Format(IC, "  место прибора в кадре ({0} непрозрачных px прибора): разница с тем, что под прибором, {1:0.0}; с прибором {2:0.0} (0…255)", nm, dDesk, dDev));
+                    bool ok = dDesk >= 0 && dDev > 0 && dDesk < dDev * 0.5 && dDesk < 25;
+                    Save(new Bitmap(desk0), Path.GetDirectoryName(bn), Path.GetFileName(bn) + "_desk.png");
+                    Save(new Bitmap(crop), Path.GetDirectoryName(bn), Path.GetFileName(bn) + "_crop.png");
+                    Save(new Bitmap(expVis), Path.GetDirectoryName(bn), Path.GetFileName(bn) + "_dev.png");
+                    int w2 = dr.Width, h2 = dr.Height, pad = 10, lab = 22;
+                    using (var cmp = new Bitmap(w2 * 3 + pad * 4, h2 + lab + pad * 2, PixelFormat.Format32bppArgb))
+                    {
+                        using (var g = Graphics.FromImage(cmp))
+                        using (var fnt = new Font("Segoe UI", 11f, FontStyle.Bold, GraphicsUnit.Pixel))
+                        using (var wb = new SolidBrush(Color.White))
+                        {
+                            g.Clear(Color.FromArgb(30, 32, 36)); g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                            Bitmap[] ims = { desk0, expVis, crop };
+                            string[] ls = { "под прибором (до показа)", "экран db (прибор виден)", "кадр mp4: " + (ok ? "прибора НЕТ" : "ПРИБОР ВИДЕН") };
+                            for (int i = 0; i < 3; i++)
+                            {
+                                int x = pad + i * (w2 + pad);
+                                g.DrawString(ls[i], fnt, wb, x, pad);
+                                g.DrawImage(ims[i], x, pad + lab, w2, h2);
+                            }
+                        }
+                        cmp.Save(bn + "_cmp.png", ImageFormat.Png);
+                    }
+                    W("ИТОГ " + mode + ": " + capMode + ", в кадре на месте прибора " + (ok ? "прибора НЕТ (виден рабочий стол) -> PASS" : "ПРИБОР ЕСТЬ -> FAIL"));
+                    code = ok ? 0 : 1;
+                }
+            }
+            catch (Exception ex) { W("FAIL исключение: " + ex); code = 9; }
+            return code;
         }
 
         // Прежняя звуковая самопроверка v5 (ключ --selftest-audio).
