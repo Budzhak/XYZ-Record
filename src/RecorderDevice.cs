@@ -1,4 +1,7 @@
-﻿// XYZ Запись v14 (01.11.2026): компактный режим — в полости «d» всегда видна красная точка (как на кнопке «Запись» прибора, ~43% полости:
+﻿﻿// XYZ Запись v15 (01.11.2026): мини-осциллограф компактного режима работает от звука, как большой осциллограф полного режима:
+// каждый кадр — тот же текущий буфер сэмплов (sbuf) и тот же Scope.Points (триггер по переходу через ноль, tanh-усиление),
+// без истории и прокрутки. Тишина — сразу ровная тонкая линия, голос — волна вибрирует на месте. Геометрия, цвета, таймер — как в v14.
+// XYZ Запись v14 (01.11.2026): компактный режим — в полости «d» всегда видна красная точка (как на кнопке «Запись» прибора, ~43% полости:
 // покой — приглушённая ~55%, наведение — ярче, запись — пульсирует, пауза — тёмная), в полости «b» — скруглённый квадратик (как «Стоп», ~38%:
 // покой — приглушённый, наведение — светлее, нажатие — темнее). Знаки рисуются под эмблемой — буквы их не перекрывают и не меняются.
 // XYZ Запись v13 (01.11.2026): захват экрана — Desktop Duplication (ffmpeg lavfi ddagrab + hwdownload), окна с WDA_EXCLUDEFROMCAPTURE
@@ -1193,98 +1196,39 @@ namespace XyzRecorder
     }
 
     // ---------- Отрисовка прибора ----------
-    // ---------- v13: мини-осциллограф компактного режима — бегущая волна ----------
-    // Плавная несущая (≈4,5 горба на ширину полосы) под огибающей громкости; огибающая (история уровня по кадрам) и несущая
-    // движутся справа налево с одной скоростью — новые звуки входят справа. Тишина — ровная тонкая линия. Без зигзага по сэмплам.
+    // ---------- v15: мини-осциллограф компактного режима — от звука, как большой ----------
+    // Каждый кадр рисует текущий буфер сэмплов тем же Scope.Points, что и большой осциллограф (тот же массив sbuf, тот же кадр).
+    // Без истории и прокрутки: тишина — ровная линия сразу, голос — волна вибрирует на месте.
     class MiniWave
     {
-        public float Speed = 34f;      // логических px в секунду
-        public float Humps = 4.5f;     // горбов несущей на ширину полосы
-        const int N = 512;
-        readonly float[] env = new float[N]; readonly double[] tm = new double[N];
-        int head = -1, count = 0; float lvl; double lastT;
-        public double Now { get { return lastT; } }
-        public void Reset() { head = -1; count = 0; lvl = 0f; }
-        public float Level { get { return lvl; } }
+        public float Gain = 5.2f;      // большой — 4,2; мини немного усилен, чтобы в полосе 11 px было видно
+        float[] buf; int avail; bool live;
+        public void Reset() { buf = null; avail = 0; live = false; }
 
-        public void Push(float[] buf, int avail, bool live, double t)
+        public void Push(float[] b, int av, bool isLive, double t)
         {
-            float target = 0f;
-            if (live && buf != null && avail > 64)
-            {
-                int n = Math.Min(512, Math.Min(avail, buf.Length)), st = buf.Length - n; double ss = 0;
-                for (int i = st; i < buf.Length; i++) ss += (double)buf[i] * buf[i];
-                double db = 20 * Math.Log10(Math.Sqrt(ss / n) + 1e-9);
-                target = (float)Math.Max(0.0, Math.Min(1.0, (db + 52.0) / 32.0));   // −52 dBFS → 0, −20 dBFS → 1
-                if (target < 0.07f) target = 0f;
-            }
-            lvl += (target - lvl) * (target > lvl ? 0.3f : 0.12f);
-            if (lvl < 0.005f) lvl = 0f;
-            if (head >= 0 && t <= tm[head]) { env[head] = lvl; return; }
-            head = (head + 1) % N; env[head] = lvl; tm[head] = t; if (count < N) count++;
-            lastT = t;
+            buf = b; avail = av; live = isLive;
         }
 
-        float At(double t)
-        {
-            if (count == 0) return 0f;
-            for (int k = 0; k < count; k++)
-            {
-                int j = (head - k + N) % N;
-                if (tm[j] <= t)
-                {
-                    if (k == 0) return env[j];
-                    int jn = (j + 1) % N; double d = tm[jn] - tm[j];
-                    float f = d > 1e-6 ? (float)((t - tm[j]) / d) : 0f;
-                    return env[j] + (env[jn] - env[j]) * f;
-                }
-            }
-            return 0f;
-        }
-
-        // Точки кривой в прямоугольнике r (px устройства); шаг — 1 px.
+        // Точки кривой в прямоугольнике r (px устройства).
         public PointF[] Points(RectangleF r, float s)
         {
-            float W = r.Width / s;
-            int n = Math.Max(8, (int)Math.Round(r.Width)) + 1;
-            var pts = new PointF[n];
-            float lam = W / Humps, amp = r.Height / 2f - 0.6f * s, mid = r.Y + r.Height / 2f;
-            double now = lastT, ph = now * Speed;
-            // огибающая по столбцам + двойное сглаживание окном ≈ полгорба: горбы мягкие, без «кочек»
-            var e = new float[n]; var e2 = new float[n];
-            for (int i = 0; i < n; i++) { float lx = W * i / (n - 1); e[i] = At(now - (W - lx) / Speed); }
-            int rad = Math.Max(1, (int)Math.Round(lam * 0.3f * s));
-            for (int pass = 0; pass < 2; pass++)
-            {
-                for (int i = 0; i < n; i++)
-                {
-                    float acc = 0f; int c = 0;
-                    for (int j = i - rad; j <= i + rad; j++) { int jj = j < 0 ? 0 : j >= n ? n - 1 : j; acc += e[jj]; c++; }
-                    e2[i] = acc / c;
-                }
-                var tmp = e; e = e2; e2 = tmp;
-            }
-            for (int i = 0; i < n; i++)
-            {
-                float lx = W * i / (n - 1);
-                float edge = Math.Min(1f, Math.Min(lx, W - lx) / 8f); edge = edge * edge * (3f - 2f * edge);
-                double v = Math.Sin(2 * Math.PI * (lx + ph) / lam);
-                pts[i] = new PointF(r.X + lx * s, mid - (float)(v * e[i] * edge * amp));
-            }
+            int w = Math.Max(8, (int)Math.Round(r.Width)), h = Math.Max(4, (int)Math.Round(r.Height));
+            PointF[] pts;
+            if (buf == null) { pts = new PointF[] { new PointF(0, h / 2f), new PointF(w, h / 2f) }; }
+            else pts = Scope.Points(buf, live ? avail : 0, w, h, 0.6f * s, Gain);
+            for (int i = 0; i < pts.Length; i++) pts[i] = new PointF(r.X + pts[i].X, r.Y + pts[i].Y);
             return pts;
-        }
-        public float MaxEnv(float W)
-        {
-            float m = 0f; for (float lx = 0; lx <= W; lx += 2f) m = Math.Max(m, At(lastT - (W - lx) / Speed)); return m;
         }
 
         // c — цвет (запись — бирюза, пауза — приглушённый янтарь), k — яркость.
         public void Draw(Graphics g, RectangleF r, float s, Color c, float k)
         {
             var pts = Points(r, s);
-            float me = MaxEnv(r.Width / s);
+            float mid = r.Y + r.Height / 2f, amp = Math.Max(1f, r.Height / 2f - 0.6f * s), me = 0f;
+            for (int i = 0; i < pts.Length; i++) me = Math.Max(me, Math.Abs(pts[i].Y - mid) / amp);
             var sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
-            float gk = 0.35f + 0.65f * me;   // в тишине свечение почти гаснет — остаётся тонкая линия
+            float gk = 0.35f + 0.65f * Math.Min(1f, me);   // в тишине свечение почти гаснет — остаётся тонкая линия
             float[] wd = { 4.6f, 2.6f }; float[] ga = { 0.09f, 0.2f };
             for (int i = 0; i < 2; i++)
                 using (var pen = new Pen(Theme.A(c, ga[i] * k * gk), wd[i] * s) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round })
@@ -2475,7 +2419,7 @@ namespace XyzRecorder
     // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
     class AboutForm : Form
     {
-        public const string Version = "v14";
+        public const string Version = "v15";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -2603,7 +2547,7 @@ namespace XyzRecorder
         float s;
         UiState ui = new UiState();
         Scope scope = new Scope();
-        MiniWave mini = new MiniWave();   // v13: мини-осциллограф компактного режима — бегущая волна
+        MiniWave mini = new MiniWave();   // v15: мини-осциллограф компактного режима — от звука, как большой
         MicMeter mm = new MicMeter();
         float[] sbuf = new float[2048];
         List<AreaItem> areas = new List<AreaItem>(); AreaItem area;
@@ -2828,7 +2772,7 @@ namespace XyzRecorder
             if (Visible && Alpha > 0)
             {
                 scope.Push(sbuf, avail, live && powered);
-                if (compact) mini.Push(sbuf, avail, live && powered, now);   // v13: тот же источник, та же частота кадров
+                if (compact) mini.Push(sbuf, avail, live && powered, now);   // v15: тот же массив sbuf и тот же кадр, что у scope.Push
                 RenderMain();
                 Present();
             }
@@ -3648,13 +3592,7 @@ namespace XyzRecorder
                 scope.Push(buf, amp > 0 ? buf.Length : 0, amp > 0 && power > 0.5f);
             }
             mini.Reset();
-            // v13: мини-волне нужна история ~2,5 с (полоса проходит за 80/34 с): 80 кадров синтетического голоса со слогами
-            for (int i = 0; i < 80; i++)
-            {
-                double ti = t - 0.033 * (79 - i);
-                Synth.Fill(buf, ti, amp * (float)Math.Max(0.0, Math.Sin(2 * Math.PI * 1.7 * ti + 0.9)));
-                mini.Push(buf, amp > 0 ? buf.Length : 0, amp > 0 && power > 0.5f, ti);
-            }
+            mini.Push(buf, amp > 0 ? buf.Length : 0, amp > 0 && power > 0.5f, t);   // v15: тот же последний буфер, что получил scope
             RenderMain();
             Log += string.Format("frame st={0} lever={1:0.00}: {2} ms\r\n", st, lever, sw2.ElapsedMilliseconds / 8.0);
             return CopyFrame();
