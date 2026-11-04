@@ -1,4 +1,6 @@
-﻿// XYZ Запись v18 (01.11.2026): новый значок приложения — виниловая пластинка (xyz_rec_vinyl.ico: /win32icon и ресурс app.ico — окно, трей). Код как в v17.
+﻿// XYZ Запись v19 (05.11.2026): облики-палитры «как в Winamp» — меню «Цвет облика ▸»: Мятный, Нуар, Чёрно-красный,
+// Чёрно-бело-красный, Зелёно-красный. Эмблема не меняется; перекрашиваются корпус (ColorMatrix), подсветка и меню. ini: palette=<id>.
+// XYZ Запись v18 (01.11.2026): новый значок приложения — виниловая пластинка (xyz_rec_vinyl.ico: /win32icon и ресурс app.ico — окно, трей). Код как в v17.
 // XYZ Запись v17 (01.11.2026): компакт в облике «Рамка» — без плашки и обводки: на прозрачном фоне только эмблема (каска, «db»),
 // мини-осциллограф и таймер; вокруг — мягкая тёмная тень (~35%) для читаемости на светлом фоне; полости «d»/«b» залиты тёмным (это кнопки).
 // Хит-тест: кнопки по маске, перетаскивание — за непрозрачные пиксели эмблемы; тень и прозрачные места пропускают щелчки
@@ -250,6 +252,42 @@ namespace XyzRecorder
         public static Color Ink = Color.FromArgb(228, 233, 238);
         public static Color Mute = Color.FromArgb(128, 137, 147);
         public static Color Dim = Color.FromArgb(84, 91, 99);
+        // v19: облики-палитры. Корпус: sat — насыщенность (0 — ч/б), br — яркость, tint/ta — оттенок и его доля.
+        public class Pal { public string Id, Name; public Color Acc, AccHi, Rec, Pause; public float Sat = 1f, Br = 1f, Ta = 0f; public Color Tint = Color.Gray; }
+        public static readonly Pal[] Pals = {
+            new Pal { Id = "mint",  Name = "Мятный",             Acc = Color.FromArgb(95, 211, 192),  AccHi = Color.FromArgb(178, 255, 238), Rec = Color.FromArgb(255, 72, 64), Pause = Color.FromArgb(255, 176, 56) },
+            new Pal { Id = "noir",  Name = "Нуар",               Acc = Color.FromArgb(214, 218, 222), AccHi = Color.FromArgb(255, 255, 255), Rec = Color.FromArgb(232, 60, 52), Pause = Color.FromArgb(200, 200, 200), Sat = 0f, Br = 0.62f },
+            new Pal { Id = "blackred", Name = "Чёрно-красный",   Acc = Color.FromArgb(232, 58, 50),   AccHi = Color.FromArgb(255, 160, 150), Rec = Color.FromArgb(255, 40, 34), Pause = Color.FromArgb(255, 150, 60), Sat = 0f, Br = 0.55f, Ta = 0.18f, Tint = Color.FromArgb(150, 40, 36) },
+            new Pal { Id = "bwred", Name = "Чёрно-бело-красный", Acc = Color.FromArgb(236, 238, 242), AccHi = Color.FromArgb(255, 255, 255), Rec = Color.FromArgb(240, 36, 36), Pause = Color.FromArgb(240, 36, 36), Sat = 0f, Br = 0.7f },
+            new Pal { Id = "greenred", Name = "Зелёно-красный",  Acc = Color.FromArgb(118, 214, 92),  AccHi = Color.FromArgb(205, 255, 185), Rec = Color.FromArgb(255, 64, 52), Pause = Color.FromArgb(255, 176, 56), Sat = 0.25f, Br = 0.78f, Ta = 0.3f, Tint = Color.FromArgb(70, 120, 60) },
+        };
+        public static Pal Cur = Pals[0];
+        public static void ApplyPal(string id)
+        {
+            Pal p = Pals[0];
+            foreach (var q in Pals) if (q.Id == id) p = q;
+            Cur = p; Teal = p.Acc; TealHi = p.AccHi; Red = p.Rec; Amber = p.Pause;
+        }
+        public static bool Plain { get { return Cur.Sat >= 0.999f && Math.Abs(Cur.Br - 1f) < 0.001f && Cur.Ta <= 0.001f; } }
+        static float Ch(float v, float lum, int ti) { float x = (lum + (v - lum) * Cur.Sat) * Cur.Br; return x * (1f - Cur.Ta) + Cur.Ta * x * (ti / 128f); }
+        // тот же пересчёт для цветов, нарисованных кодом (плашка, кнопки, меню)
+        public static Color Shade(Color c)
+        {
+            if (Plain) return c;
+            float l = 0.299f * c.R + 0.587f * c.G + 0.114f * c.B;
+            Func<float, int> cl = v => Math.Max(0, Math.Min(255, (int)Math.Round(v)));
+            return Color.FromArgb(c.A, cl(Ch(c.R, l, Cur.Tint.R)), cl(Ch(c.G, l, Cur.Tint.G)), cl(Ch(c.B, l, Cur.Tint.B)));
+        }
+        public static ColorMatrix BodyMatrix(float alpha)
+        {
+            float s = Cur.Sat, ir = 0.299f * (1 - s), ig = 0.587f * (1 - s), ib = 0.114f * (1 - s);
+            float kr = Cur.Br * (1f - Cur.Ta + Cur.Ta * Cur.Tint.R / 128f), kg = Cur.Br * (1f - Cur.Ta + Cur.Ta * Cur.Tint.G / 128f), kb = Cur.Br * (1f - Cur.Ta + Cur.Ta * Cur.Tint.B / 128f);
+            return new ColorMatrix(new float[][] {
+                new float[] { (ir + s) * kr, ir * kg, ir * kb, 0, 0 },
+                new float[] { ig * kr, (ig + s) * kg, ig * kb, 0, 0 },
+                new float[] { ib * kr, ib * kg, (ib + s) * kb, 0, 0 },
+                new float[] { 0, 0, 0, alpha, 0 }, new float[] { 0, 0, 0, 0, 1 } });
+        }
         public static Color A(Color c, float a) { return Color.FromArgb(Math.Max(0, Math.Min(255, (int)(a * 255))), c.R, c.G, c.B); }
         public static Color Mix(Color a, Color b, float t)
         {
@@ -303,7 +341,40 @@ namespace XyzRecorder
             catch { return null; }
         }
         // Спрайт нужного масштаба: логический размер = @1x; при s>1 — из @2x.
+        // v19: эмблема в облике — та же форма, перекрашены только цветные части (каска) в цвет облика, буквы — нейтрально-белые
         public static Bitmap Get(string name, float s)
+        {
+            if (name == "emblem" && Theme.Cur.Id != "mint")
+            {
+                string pk = "emblem#" + Theme.Cur.Id + "|" + s.ToString("0.000");
+                Bitmap pb;
+                if (cache.TryGetValue(pk, out pb)) return pb;
+                var orig = GetRaw(name, s);
+                pb = orig == null ? null : Recolor(orig, Theme.Cur.Acc);
+                cache[pk] = pb; return pb;
+            }
+            return GetRaw(name, s);
+        }
+        static Bitmap Recolor(Bitmap src, Color acc)
+        {
+            var b = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppArgb);
+            float la = Math.Max(1f, 0.299f * acc.R + 0.587f * acc.G + 0.114f * acc.B);
+            for (int y = 0; y < src.Height; y++)
+                for (int x = 0; x < src.Width; x++)
+                {
+                    var c = src.GetPixel(x, y);
+                    if (c.A == 0) { b.SetPixel(x, y, c); continue; }
+                    int mx = Math.Max(c.R, Math.Max(c.G, c.B)), mn = Math.Min(c.R, Math.Min(c.G, c.B));
+                    float sat = mx == 0 ? 0 : (mx - mn) / (float)mx;
+                    float l = 0.299f * c.R + 0.587f * c.G + 0.114f * c.B;
+                    float k = Math.Min(1f, sat * 2.2f);             // насколько пиксель «цветной»
+                    float m = l / la;
+                    Func<float, float, int> f = (g0, ac) => Math.Max(0, Math.Min(255, (int)Math.Round(g0 * (1 - k) + Math.Min(255f, ac * m) * k)));
+                    b.SetPixel(x, y, Color.FromArgb(c.A, f(l, acc.R), f(l, acc.G), f(l, acc.B)));
+                }
+            return b;
+        }
+        static Bitmap GetRaw(string name, float s)
         {
             string key = name + "|" + s.ToString("0.000");
             Bitmap b;
@@ -346,6 +417,17 @@ namespace XyzRecorder
             g.InterpolationMode = InterpolationMode.NearestNeighbor; g.PixelOffsetMode = PixelOffsetMode.Half;
             if (alpha >= 0.997f) g.DrawImage(b, r, 0, 0, b.Width, b.Height, GraphicsUnit.Pixel);
             else using (var ia = Attr(1, 1, 1, alpha)) g.DrawImage(b, r, 0, 0, b.Width, b.Height, GraphicsUnit.Pixel, ia);
+            g.InterpolationMode = im; g.PixelOffsetMode = po;
+        }
+        // v19: корпус и плашка — через палитру облика (эмблема рисуется обычным Draw и не меняется)
+        public static void DrawBody(Graphics g, Bitmap b, float x, float y, float alpha)
+        {
+            if (Theme.Plain) { Draw(g, b, x, y, alpha); return; }
+            if (b == null || alpha <= 0.003f) return;
+            var r = new Rectangle((int)Math.Round(x), (int)Math.Round(y), b.Width, b.Height);
+            var im = g.InterpolationMode; var po = g.PixelOffsetMode;
+            g.InterpolationMode = InterpolationMode.NearestNeighbor; g.PixelOffsetMode = PixelOffsetMode.Half;
+            using (var ia = new ImageAttributes()) { ia.SetColorMatrix(Theme.BodyMatrix(Math.Min(1f, alpha))); g.DrawImage(b, r, 0, 0, b.Width, b.Height, GraphicsUnit.Pixel, ia); }
             g.InterpolationMode = im; g.PixelOffsetMode = po;
         }
         public static void DrawTint(Graphics g, Bitmap b, float x, float y, Color c, float alpha)
@@ -436,8 +518,26 @@ namespace XyzRecorder
             c.Add(@"C:\Program Files (x86)\Shotcut\ffmpeg.exe");
             foreach (var p in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
                 if (p.Trim().Length > 0) c.Add(Path.Combine(p.Trim(), "ffmpeg.exe"));
+            // v19: кандидат должен реально запускаться (на Яндекс.Диске файлы бывают «только в облаке» — exe есть, а DLL не скачаны)
+            if (ffCache != null && File.Exists(ffCache)) return ffCache;
+            foreach (var f in c) { try { if (File.Exists(f) && Works(f)) { ffCache = f; return f; } } catch { } }
             foreach (var f in c) { try { if (File.Exists(f)) return f; } catch { } }
             return null;
+        }
+        static string ffCache;
+        static bool Works(string exe)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(exe, "-hide_banner -version") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+                using (var p = Process.Start(psi))
+                {
+                    p.StandardOutput.ReadToEndAsync(); p.StandardError.ReadToEndAsync();
+                    if (!p.WaitForExit(8000)) { try { p.Kill(); } catch { } return false; }
+                    return p.ExitCode == 0;
+                }
+            }
+            catch { return false; }
         }
 
         static ProcessStartInfo Psi(string exe, string args, bool stdin)
@@ -1330,8 +1430,8 @@ namespace XyzRecorder
             float sk = Math.Max(0f, Math.Min(1f, st.SkinK));
             float ek = sk * sk * (3 - 2 * sk);          // v8: облик (сглаженный)
             Halo = ek; HaloS = Math.Max(1f, s);
-            Res.Draw(g, Res.Get("body", s), 0, 0, 1f - ek);
-            if (ek > 0.003f) Res.Draw(g, Res.Get("frame", s), 0, 0, ek);
+            Res.DrawBody(g, Res.Get("body", s), 0, 0, 1f - ek);
+            if (ek > 0.003f) Res.DrawBody(g, Res.Get("frame", s), 0, 0, ek);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
@@ -1653,7 +1753,7 @@ namespace XyzRecorder
             g.CompositingMode = CompositingMode.SourceCopy;
             g.Clear(Color.Transparent);
             g.CompositingMode = CompositingMode.SourceOver;
-            Res.Draw(g, Res.Get("plaque", s), 0, 0, 1f);
+            Res.DrawBody(g, Res.Get("plaque", s), 0, 0, 1f);
             g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             float pulse = (float)(0.5 + 0.5 * Math.Sin(st.T * 2 * Math.PI * 0.8));
@@ -1740,10 +1840,12 @@ namespace XyzRecorder
         static Bitmap embNT; static float embNTs = -1f;
         // Эмблема без надписи «BIM DESIGN»: стираются только бирюзовые пиксели надписи (G−R > 55) в строке надписи;
         // беловатое свечение низа букв «db» остаётся — горизонтального среза нет.
+        static string embNTp = "";
         static Bitmap EmblemNoText(float s)
         {
             var em = Res.Get("emblem", s); if (em == null) return null;
-            if (embNT != null && Math.Abs(embNTs - s) < 0.0001f) return embNT;
+            if (embNT != null && Math.Abs(embNTs - s) < 0.0001f && embNTp == Theme.Cur.Id) return embNT;   // v19: и облик тот же
+            embNTp = Theme.Cur.Id;
             if (embNT != null) { embNT.Dispose(); embNT = null; }
             var b = new Bitmap(em.Width, em.Height, PixelFormat.Format32bppPArgb);
             using (var g = Graphics.FromImage(b)) { g.CompositingMode = CompositingMode.SourceCopy; g.DrawImage(em, new Rectangle(0, 0, em.Width, em.Height), 0, 0, em.Width, em.Height, GraphicsUnit.Pixel); }
@@ -2062,7 +2164,7 @@ namespace XyzRecorder
                 float ra = (st.Rec == 1 ? 0.4f + (0.03f + 0.4f * pulse) * st.RecK : st.Rec == 2 ? 0.55f : 0.36f) * pw * pk;
                 using (var p = Theme.Round(pr, 24 * s))
                 {
-                    using (var b = new LinearGradientBrush(new RectangleF(pr.X, pr.Y - 1, pr.Width, pr.Height + 2), Theme.A(Color.FromArgb(31, 35, 41), pk), Theme.A(Color.FromArgb(15, 17, 21), pk), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                    using (var b = new LinearGradientBrush(new RectangleF(pr.X, pr.Y - 1, pr.Width, pr.Height + 2), Theme.A(Theme.Shade(Color.FromArgb(31, 35, 41)), pk), Theme.A(Theme.Shade(Color.FromArgb(15, 17, 21)), pk), LinearGradientMode.Vertical)) g.FillPath(b, p);
                     Glow(g, p, rc, s, ra);
                     using (var pen = new Pen(Theme.A(Theme.Mix(rc, Color.White, 0.1f), ra), 1.2f * s)) g.DrawPath(pen, p);
                 }
@@ -2156,7 +2258,7 @@ namespace XyzRecorder
                 }
                 else
                 {
-                    using (var b = new LinearGradientBrush(new RectangleF(rr.X, rr.Y - 1, rr.Width, rr.Height + 2), Theme.A(Color.FromArgb(46, 52, 60), a), Theme.A(Color.FromArgb(24, 27, 32), a), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                    using (var b = new LinearGradientBrush(new RectangleF(rr.X, rr.Y - 1, rr.Width, rr.Height + 2), Theme.A(Theme.Shade(Color.FromArgb(46, 52, 60)), a), Theme.A(Theme.Shade(Color.FromArgb(24, 27, 32)), a), LinearGradientMode.Vertical)) g.FillPath(b, p);
                     using (var pen = new Pen(Theme.A(Color.White, 0.16f * a), 1f * s)) g.DrawPath(pen, p);
                 }
             }
@@ -2327,13 +2429,13 @@ namespace XyzRecorder
     // ---------- Тёмные меню ----------
     class DarkColors : ProfessionalColorTable
     {
-        static Color bg = Color.FromArgb(22, 25, 30), sel = Color.FromArgb(30, 58, 60), line = Color.FromArgb(48, 56, 62);
+        static Color bg { get { return Theme.Shade(Color.FromArgb(22, 25, 30)); } }  static Color sel { get { return Theme.Mix(Color.FromArgb(22, 25, 30), Theme.Teal, 0.22f); } }  static Color line = Color.FromArgb(48, 56, 62);
         public override Color ToolStripDropDownBackground { get { return bg; } }
         public override Color ImageMarginGradientBegin { get { return bg; } }
         public override Color ImageMarginGradientMiddle { get { return bg; } }
         public override Color ImageMarginGradientEnd { get { return bg; } }
         public override Color MenuBorder { get { return line; } }
-        public override Color MenuItemBorder { get { return Color.FromArgb(60, 120, 112); } }
+        public override Color MenuItemBorder { get { return Theme.Mix(Color.FromArgb(22, 25, 30), Theme.Teal, 0.5f); } }
         public override Color MenuItemSelected { get { return sel; } }
         public override Color MenuItemSelectedGradientBegin { get { return sel; } }
         public override Color MenuItemSelectedGradientEnd { get { return sel; } }
@@ -2604,9 +2706,410 @@ namespace XyzRecorder
     }
 
     // ---------- v11: «О программе» — маленькое окно в стиле прибора ----------
+
+    // ---------- v19: окошко «Сохранено» и простая обрезка ----------
+    static class Ui19
+    {
+        public static Control Btn(string t, bool main) { return new XyzButton(t, main); }
+        static GraphicsPath Rect(RectangleF r) { var p = new GraphicsPath(); p.AddRectangle(r); return p; }
+        static Dictionary<Bitmap, Bitmap> trims = new Dictionary<Bitmap, Bitmap>();
+        // обрезать прозрачные поля спрайта (для маленькой эмблемы в шапке)
+        public static Bitmap Trim(Bitmap b)
+        {
+            if (b == null) return null;
+            Bitmap t; if (trims.TryGetValue(b, out t)) return t;
+            int x0 = b.Width, y0 = b.Height, x1 = -1, y1 = -1;
+            for (int y = 0; y < b.Height; y++) for (int x = 0; x < b.Width; x++) if (b.GetPixel(x, y).A > 24) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }
+            t = x1 < 0 ? b : b.Clone(new Rectangle(x0, y0, x1 - x0 + 1, y1 - y0 + 1), b.PixelFormat);
+            trims[b] = t; return t;
+        }
+        // общий фон окон: «корпус» прибора — тёмный градиент, скругление, кромка цвета облика
+        public static void Body(Graphics g, Rectangle r, float rad)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var p = rad <= 0 ? Rect(new RectangleF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1)) : Theme.Round(new RectangleF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1), rad))
+            {
+                using (var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), Theme.Shade(Color.FromArgb(34, 38, 45)), Theme.Shade(Color.FromArgb(13, 15, 19)), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                if (rad > 0) for (int k = 3; k >= 1; k--) using (var pen = new Pen(Theme.A(Theme.Teal, 0.10f * k), 1f + 2 * (3 - k))) g.DrawPath(pen, p);
+                using (var pen = new Pen(Theme.A(Theme.Teal, 0.55f), 1.2f)) g.DrawPath(pen, p);
+            }
+        }
+        // утопленный «экран» как у осциллографа
+        public static void Screen(Graphics g, RectangleF r, float rad)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var p = Theme.Round(r, rad))
+            {
+                using (var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), Color.FromArgb(5, 8, 10), Color.FromArgb(10, 14, 17), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                using (var pen = new Pen(Color.FromArgb(140, 0, 0, 0), 2f)) g.DrawPath(pen, p);
+                using (var pen = new Pen(Color.FromArgb(22, 255, 255, 255), 1f)) g.DrawPath(pen, Theme.Round(new RectangleF(r.X - 1, r.Y - 1, r.Width + 2, r.Height + 2), rad + 1));
+            }
+        }
+        public static void Gloss(Graphics g, RectangleF r, float rad)
+        {
+            using (var p = Theme.Round(new RectangleF(r.X + 2, r.Y + 2, r.Width - 4, r.Height * 0.35f), rad))
+            using (var b = new LinearGradientBrush(new RectangleF(r.X, r.Y, r.Width, r.Height * 0.35f + 2), Color.FromArgb(18, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), LinearGradientMode.Vertical)) g.FillPath(b, p);
+        }
+        public static string Fmt(double sec) { if (sec < 0) sec = 0; var t = TimeSpan.FromSeconds(sec); return ((int)t.TotalMinutes).ToString("00") + ":" + t.Seconds.ToString("00") + "." + (t.Milliseconds / 100); }
+        public static bool Parse(string s, out double sec)
+        {
+            sec = 0; s = (s ?? "").Trim().Replace(',', '.');
+            try
+            {
+                var parts = s.Split(':'); double v = 0;
+                foreach (var q in parts) v = v * 60 + double.Parse(q, System.Globalization.CultureInfo.InvariantCulture);
+                sec = v; return true;
+            }
+            catch { return false; }
+        }
+    }
+
+    class XyzButton : Control
+    {
+        readonly bool main; bool hot, down;
+        public XyzButton(string t, bool m)
+        {
+            Text = t; main = m; Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true);
+            BackColor = Color.Transparent; Font = Theme.Px(Theme.UiSemi, 13f, FontStyle.Regular);
+            var sz = TextRenderer.MeasureText(t, Font); Size = new Size(sz.Width + 30, 34); Margin = new Padding(4, 4, 6, 4);
+        }
+        protected override void OnMouseEnter(EventArgs e) { hot = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hot = false; down = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            var r = new RectangleF(3, 3, Width - 6, Height - 6);
+            using (var p = Theme.Round(r, r.Height / 2))
+            {
+                if (main)
+                {
+                    float k = !Enabled ? 0.35f : down ? 0.8f : hot ? 1f : 0.9f;
+                    for (int i = 3; i >= 1; i--) using (var pen = new Pen(Theme.A(Theme.Teal, 0.12f * i * k), 2f * (4 - i))) g.DrawPath(pen, p);
+                    using (var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), Theme.A(Theme.Mix(Theme.Teal, Color.White, 0.25f), k), Theme.A(Theme.Teal, k), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                }
+                else
+                {
+                    using (var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), Theme.Shade(Color.FromArgb(down ? 30 : 50, down ? 34 : 56, down ? 40 : 64)), Theme.Shade(Color.FromArgb(22, 25, 30)), LinearGradientMode.Vertical)) g.FillPath(b, p);
+                    using (var pen = new Pen(hot ? Theme.A(Theme.Teal, 0.85f) : Color.FromArgb(40, 255, 255, 255), hot ? 1.4f : 1f)) g.DrawPath(pen, p);
+                }
+            }
+            var tc = main ? Color.FromArgb(Enabled ? 255 : 120, 12, 14, 17) : (Enabled ? (hot ? Color.White : Theme.Ink) : Theme.Dim);
+            TextRenderer.DrawText(g, Text, Font, Rectangle.Round(r), tc, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+    }
+
+    // окно в стиле прибора: без системной рамки, своя шапка (эмблема, заголовок, ✕), перетаскивание за шапку
+    class XyzForm : Form
+    {
+        protected string Caption = ""; protected const int HeadH = 40; Rectangle closeR; bool closeHot; Point dragFrom; bool dragging;
+        public XyzForm()
+        {
+            FormBorderStyle = FormBorderStyle.None; DoubleBuffered = true; BackColor = Theme.Shade(Color.FromArgb(18, 21, 25));
+            ForeColor = Theme.Ink; Font = Theme.Px(Theme.UiFam, 13f, FontStyle.Regular); Padding = new Padding(12, HeadH + 4, 12, 10);
+            try { using (var st = Res.Raw("app.ico")) if (st != null) Icon = new Icon(st); } catch { }
+        }
+        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ClassStyle |= 0x20000; return cp; } }   // тень окна
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Theme.Shade(Color.FromArgb(18, 21, 25)));
+            Ui19.Body(g, ClientRectangle, 0);
+            var em = Ui19.Trim(Res.Get("emblem", 0.5f));
+            int x = 14, eh = HeadH - 12;
+            if (em != null) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; int ew = eh * em.Width / Math.Max(1, em.Height); g.DrawImage(em, new Rectangle(x, 7, ew, eh)); x += ew + 10; }
+            TextRenderer.DrawText(g, Caption, Theme.Px(Theme.UiSemi, 14f, FontStyle.Regular), new Rectangle(x, 0, Width - x - 50, HeadH + 2), Theme.Teal, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            closeR = new Rectangle(Width - 38, (HeadH - 26) / 2 + 2, 26, 26);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (closeHot) using (var b = new SolidBrush(Color.FromArgb(150, 200, 50, 46))) g.FillEllipse(b, closeR);
+            using (var pen = new Pen(closeHot ? Color.White : Theme.Mute, 1.6f)) { var c = new PointF(closeR.X + 13, closeR.Y + 13); g.DrawLine(pen, c.X - 5, c.Y - 5, c.X + 5, c.Y + 5); g.DrawLine(pen, c.X - 5, c.Y + 5, c.X + 5, c.Y - 5); }
+            using (var pen = new Pen(Color.FromArgb(28, 255, 255, 255))) g.DrawLine(pen, 14, HeadH + 1, Width - 14, HeadH + 1);
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            bool h = closeR.Contains(e.Location); if (h != closeHot) { closeHot = h; Invalidate(closeR); }
+            if (dragging) { var p = PointToScreen(e.Location); Location = new Point(p.X - dragFrom.X, p.Y - dragFrom.Y); }
+            base.OnMouseMove(e);
+        }
+        protected override void OnMouseLeave(EventArgs e) { if (closeHot) { closeHot = false; Invalidate(closeR); } base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && closeR.Contains(e.Location)) { Close(); return; }
+            if (e.Button == MouseButtons.Left && e.Y < HeadH) { dragging = true; dragFrom = e.Location; }
+            base.OnMouseDown(e);
+        }
+        protected override void OnMouseUp(MouseEventArgs e) { dragging = false; base.OnMouseUp(e); }
+        protected override void OnResize(EventArgs e) { base.OnResize(e); Invalidate(); }   // v19: углы прямые — скругление через Region даёт рваный край (замечание db 01:10)
+    }
+
+    class SavedToast : XyzForm
+    {
+        readonly string file; readonly System.Windows.Forms.Timer life = new System.Windows.Forms.Timer();
+        int left = 10;
+        public SavedToast(string path, string msg, bool warn, bool exclude)
+        {
+            file = path;
+            Caption = warn ? "Сохранено (с предупреждением)" : "Сохранено";
+            ShowInTaskbar = false; TopMost = true; StartPosition = FormStartPosition.Manual;
+            AutoSize = true; AutoSizeMode = AutoSizeMode.GrowAndShrink; Padding = new Padding(0, 0, 16, 12); MinimumSize = new Size(340, 0);
+            var col = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, BackColor = Color.Transparent, WrapContents = false };
+            double dd = TrimForm.Duration(path);
+            var t2 = new Label { Text = Path.GetFileName(path), AutoSize = true, BackColor = Color.Transparent, ForeColor = Theme.Ink, Font = Theme.Px(Theme.UiFam, 13f, FontStyle.Regular), Margin = new Padding(3, 0, 3, 0), MaximumSize = new Size(420, 0) };
+            var t3 = new Label { Text = dd > 0 ? Ui19.Fmt(dd).Substring(0, 5) : "", AutoSize = true, BackColor = Color.Transparent, ForeColor = Theme.Teal, Font = Theme.Px(Theme.DigitFam, 26f, FontStyle.Regular), Margin = new Padding(1, 0, 3, 6) };
+            var row = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, BackColor = Color.Transparent, WrapContents = false };
+            var bOpen = Ui19.Btn("Открыть", true); bOpen.Click += (o, e) => { try { Process.Start(file); } catch { } Close(); };
+            var bDir = Ui19.Btn("Папка", false); bDir.Click += (o, e) => { try { Process.Start("explorer.exe", "/select,\"" + file + "\""); } catch { } Close(); };
+            var bCut = Ui19.Btn("Обрезать…", false); bCut.Click += (o, e) => { Hide(); using (var f = new TrimForm(file)) f.ShowDialog(); Close(); };
+            row.Controls.AddRange(new Control[] { bOpen, bDir, bCut });
+            col.Controls.AddRange(new Control[] { t3, t2, row });
+            col.Location = new Point(12, HeadH + 6);   // под шапкой
+            Controls.Add(col);
+            if (exclude) HandleCreated += (o, e) => { try { Native.SetWindowDisplayAffinity(Handle, Native.WDA_EXCLUDEFROMCAPTURE); } catch { } };
+            life.Interval = 1000;
+            life.Tick += (o, e) => { if (Bounds.Contains(Cursor.Position)) { left = 6; return; } if (--left <= 0) Close(); };
+            Shown += (o, e) => { var wa = Screen.FromPoint(Cursor.Position).WorkingArea; Location = new Point(wa.Right - Width - 16, wa.Bottom - Height - 16); life.Start(); };
+        }
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override void Dispose(bool d) { if (d) life.Dispose(); base.Dispose(d); }
+    }
+
+    // v19: мини-редактор «как в Audition» — кадры ролика + звуковая дорожка; выделение мышью, пробел — прослушать, Delete — вырезать
+    class TrimForm : XyzForm
+    {
+        readonly string file; double dur; string ff;
+        float[] peaks = new float[0]; const int SR = 2000; short[] pcm = new short[0];
+        Bitmap thumbs; WavePanel wave; Label info; Control bSave;
+        public double SelA = -1, SelB = -1, Head = 0;
+        public List<double[]> Cuts = new List<double[]>();
+        System.Media.SoundPlayer player; System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
+        Stopwatch playSw = new Stopwatch(); double playFrom, playTo; bool playing; string tmpDir;
+        public TrimForm(string path)
+        {
+            file = path; ff = Engine.FindFfmpeg();
+            Text = "Обрезать — XYZ Запись · " + Path.GetFileName(path); Caption = "Обрезать  ·  " + Path.GetFileName(path);
+            StartPosition = FormStartPosition.CenterScreen; KeyPreview = true; Size = new Size(1100, 400);
+            tmpDir = Path.Combine(Path.GetTempPath(), "xyz_trim_" + Guid.NewGuid().ToString("N").Substring(0, 8)); Directory.CreateDirectory(tmpDir);
+            var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(2, 2, 2, 4), WrapContents = false, BackColor = Color.Transparent };
+            var bPlay = Ui19.Btn("▶ Прослушать (пробел)", false); bPlay.Click += (o, e) => TogglePlay();
+            var bCut = Ui19.Btn("✂ Вырезать (Delete)", false); bCut.Click += (o, e) => CutSel();
+            var bUndo = Ui19.Btn("↶ Отменить (Ctrl+Z)", false); bUndo.Click += (o, e) => Undo();
+            bSave = Ui19.Btn("Сохранить копию", true); bSave.Click += (o, e) => Save();
+            var bOpen = Ui19.Btn("Открыть ролик", false); bOpen.Click += (o, e) => { try { Process.Start(file); } catch { } };
+            top.Controls.AddRange(new Control[] { bPlay, bCut, bUndo, bSave, bOpen });
+            info = new Label { Dock = DockStyle.Bottom, Height = 30, ForeColor = Theme.Mute, Padding = new Padding(6, 8, 6, 0), BackColor = Color.Transparent, Font = Theme.Px(Theme.UiFam, 12.5f, FontStyle.Regular),
+                Text = "Выделите кусок мышью на дорожке. Пробел — прослушать, Delete — вырезать, Ctrl+Z — вернуть. Оригинал не меняется." };
+            wave = new WavePanel(this) { Dock = DockStyle.Fill };
+            Controls.Add(wave); Controls.Add(top); Controls.Add(info);
+            KeyDown += OnKey;
+            tick.Interval = 30; tick.Tick += (o, e) => { if (playing) { Head = playFrom + playSw.Elapsed.TotalSeconds; if (Head >= playTo) StopPlay(); wave.Invalidate(); } };
+            Shown += (o, e) => { Cursor = Cursors.WaitCursor; var th = new Thread(Load2); th.IsBackground = true; th.Start(); };
+            FormClosed += (o, e) => { StopPlay(); try { Directory.Delete(tmpDir, true); } catch { } };
+        }
+        public double Dur { get { return dur; } }
+        public volatile bool Ready;
+        public float[] Peaks { get { return peaks; } }
+        public Bitmap Thumbs { get { return thumbs; } }
+        void Load2()
+        {
+            try
+            {
+                dur = Duration(file);
+                var psi = new ProcessStartInfo(ff, "-hide_banner -v error -i \"" + file + "\" -vn -ac 1 -ar " + SR + " -f s16le -") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+                using (var p = Process.Start(psi))
+                using (var ms = new MemoryStream())
+                {
+                    p.StandardOutput.BaseStream.CopyTo(ms); p.WaitForExit(60000);
+                    var b = ms.ToArray(); pcm = new short[b.Length / 2];
+                    Buffer.BlockCopy(b, 0, pcm, 0, pcm.Length * 2);
+                }
+                if (dur <= 0) dur = pcm.Length / (double)SR;
+                int n = 0; string tp = Path.Combine(tmpDir, "thumbs.png");
+                var p2 = new ProcessStartInfo(ff, "-hide_banner -v error -y -i \"" + file + "\" -vf \"fps=" + (n / Math.Max(0.5, dur)).ToString("0.######", System.Globalization.CultureInfo.InvariantCulture) + ",scale=-2:72,tile=" + n + "x1\" -frames:v 1 \"" + tp + "\"") { UseShellExecute = false, CreateNoWindow = true };
+                if (n > 0) using (var p = Process.Start(p2)) p.WaitForExit(60000);
+                if (File.Exists(tp)) using (var fs = new FileStream(tp, FileMode.Open, FileAccess.Read)) thumbs = new Bitmap(Image.FromStream(fs));
+            }
+            catch { }
+            Ready = true;
+            try { BeginInvoke(new Action(() => { Cursor = Cursors.Default; wave.Invalidate(); UpdInfo(); })); } catch { }
+        }
+        public float PeakAt(double t0, double t1)
+        {
+            if (pcm.Length == 0) return 0;
+            int a = Math.Max(0, (int)(t0 * SR)), b = Math.Min(pcm.Length, Math.Max(a + 1, (int)(t1 * SR)));
+            int m = 0; for (int i = a; i < b; i++) { int v = Math.Abs((int)pcm[i]); if (v > m) m = v; }
+            return m / 32768f;
+        }
+        void OnKey(object o, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Space) { TogglePlay(); e.Handled = true; e.SuppressKeyPress = true; }
+            else if (e.KeyCode == Keys.Delete || e.KeyCode == Keys.Back) { CutSel(); e.Handled = true; }
+            else if (e.Control && e.KeyCode == Keys.Z) { Undo(); e.Handled = true; }
+            else if (e.KeyCode == Keys.Escape) { SelA = SelB = -1; wave.Invalidate(); UpdInfo(); }
+        }
+        bool HasSel { get { return SelA >= 0 && SelB > SelA + 0.05; } }
+        void CutSel()
+        {
+            if (!HasSel) { info.ForeColor = Theme.Amber; info.Text = "Сначала выделите кусок мышью на дорожке."; return; }
+            Cuts.Add(new[] { SelA, SelB }); SelA = SelB = -1; wave.Invalidate(); UpdInfo();
+        }
+        void Undo() { if (Cuts.Count > 0) { Cuts.RemoveAt(Cuts.Count - 1); wave.Invalidate(); UpdInfo(); } }
+        public bool IsCut(double t) { foreach (var c in Cuts) if (t >= c[0] && t < c[1]) return true; return false; }
+        List<double[]> Keep()
+        {
+            var cs = new List<double[]>(Cuts); cs.Sort((x, y) => x[0].CompareTo(y[0]));
+            var res = new List<double[]>(); double cur = 0;
+            foreach (var c in cs) { if (c[0] > cur + 0.02) res.Add(new[] { cur, c[0] }); cur = Math.Max(cur, c[1]); }
+            if (dur > cur + 0.02) res.Add(new[] { cur, dur });
+            return res;
+        }
+        public void UpdInfo()
+        {
+            double kept = 0; foreach (var k in Keep()) kept += k[1] - k[0];
+            info.ForeColor = Theme.Mute;
+            info.Text = (HasSel ? "Выделено " + Ui19.Fmt(SelA) + " – " + Ui19.Fmt(SelB) + " (" + Ui19.Fmt(SelB - SelA) + ")   ·   " : "")
+                + "Вырезано кусков: " + Cuts.Count + "   ·   длина после: " + Ui19.Fmt(kept) + " из " + Ui19.Fmt(dur)
+                + "      пробел — слушать, Delete — вырезать, Ctrl+Z — вернуть";
+        }
+        void TogglePlay()
+        {
+            if (playing) { StopPlay(); return; }
+            double a = HasSel ? SelA : Head, b = HasSel ? SelB : Math.Min(dur, Head + 8);
+            if (b <= a + 0.05) { a = 0; b = Math.Min(dur, 8); }
+            string w = Path.Combine(tmpDir, "play.wav");
+            try
+            {
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                var psi = new ProcessStartInfo(ff, "-hide_banner -v error -y -ss " + a.ToString("0.###", inv) + " -to " + b.ToString("0.###", inv) + " -i \"" + file + "\" -vn -ac 2 -ar 44100 \"" + w + "\"") { UseShellExecute = false, CreateNoWindow = true };
+                using (var p = Process.Start(psi)) p.WaitForExit(20000);
+                player = new System.Media.SoundPlayer(w); player.Load(); player.Play();
+                playFrom = a; playTo = b; Head = a; playing = true; playSw.Restart(); tick.Start();
+            }
+            catch { playing = false; }
+        }
+        void StopPlay() { playing = false; tick.Stop(); try { if (player != null) { player.Stop(); player.Dispose(); player = null; } } catch { } if (wave != null) wave.Invalidate(); }
+        void Save()
+        {
+            var keep = Keep();
+            if (Cuts.Count == 0) { info.ForeColor = Theme.Amber; info.Text = "Ничего не вырезано — выделите кусок и нажмите Delete."; return; }
+            if (keep.Count == 0) { info.ForeColor = Theme.Red; info.Text = "Вырезано всё — нечего сохранять."; return; }
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var expr = new StringBuilder();
+            foreach (var k in keep) { if (expr.Length > 0) expr.Append('+'); expr.Append("between(t," + k[0].ToString("0.###", inv) + "," + k[1].ToString("0.###", inv) + ")"); }
+            string outF = Path.Combine(Path.GetDirectoryName(file), Path.GetFileNameWithoutExtension(file) + " обрезка.mp4");
+            for (int i = 2; File.Exists(outF); i++) outF = Path.Combine(Path.GetDirectoryName(file), Path.GetFileNameWithoutExtension(file) + " обрезка " + i + ".mp4");
+            string fs = "[0:v]select='" + expr + "',setpts=N/FRAME_RATE/TB[v];[0:a]aselect='" + expr + "',asetpts=N/SR/TB[a]";
+            string args = "-hide_banner -y -i \"" + file + "\" -filter_complex \"" + fs + "\" -map \"[v]\" -map \"[a]\" -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 160k -movflags +faststart \"" + outF + "\"";
+            bool hasAudio = pcm.Length > 0;
+            if (!hasAudio) args = "-hide_banner -y -i \"" + file + "\" -vf \"select='" + expr + "',setpts=N/FRAME_RATE/TB\" -c:v libx264 -preset veryfast -crf 20 -movflags +faststart \"" + outF + "\"";
+            bSave.Enabled = false; info.ForeColor = Theme.Mute; info.Text = "Сохраняю копию…"; Cursor = Cursors.WaitCursor;
+            var th = new Thread(() =>
+            {
+                bool ok = false;
+                try
+                {
+                    var psi = new ProcessStartInfo(ff, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+                    using (var p = Process.Start(psi)) { p.StandardError.ReadToEnd(); p.WaitForExit(); ok = p.ExitCode == 0 && File.Exists(outF); }
+                }
+                catch { }
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        bSave.Enabled = true; Cursor = Cursors.Default;
+                        if (ok) { info.ForeColor = Theme.Teal; info.Text = "Готово: " + Path.GetFileName(outF) + " — рядом с оригиналом."; try { Process.Start("explorer.exe", "/select,\"" + outF + "\""); } catch { } }
+                        else { info.ForeColor = Theme.Red; info.Text = "Не получилось сохранить."; }
+                    }));
+                }
+                catch { }
+            });
+            th.IsBackground = true; th.Start();
+        }
+        public static double Duration(string f)
+        {
+            try
+            {
+                string ff = Engine.FindFfmpeg(); if (ff == null) return 0;
+                var psi = new ProcessStartInfo(ff, "-hide_banner -i \"" + f + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, StandardErrorEncoding = Encoding.UTF8 };
+                using (var p = Process.Start(psi))
+                {
+                    string err = p.StandardError.ReadToEnd(); p.WaitForExit(5000);
+                    var m = System.Text.RegularExpressions.Regex.Match(err, @"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)");
+                    if (m.Success) return int.Parse(m.Groups[1].Value) * 3600 + int.Parse(m.Groups[2].Value) * 60 + double.Parse(m.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture);
+                }
+            }
+            catch { }
+            return 0;
+        }
+    }
+
+    class WavePanel : Panel
+    {
+        readonly TrimForm ed; bool drag; double dragT0;
+        public WavePanel(TrimForm e)
+        {
+            ed = e; DoubleBuffered = true; ResizeRedraw = true; BackColor = Color.Transparent; Cursor = Cursors.IBeam;
+            SetStyle(ControlStyles.Selectable, false);
+        }
+        const int M = 14, TH = 72;
+        double T(int x) { double w = Math.Max(1, Width - 2 * M); return Math.Max(0, Math.Min(ed.Dur, (x - M) / w * ed.Dur)); }
+        float X(double t) { return (float)(M + (ed.Dur <= 0 ? 0 : t / ed.Dur) * (Width - 2 * M)); }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left || ed.Dur <= 0) return;
+            drag = true; dragT0 = T(e.X); ed.Head = dragT0; ed.SelA = ed.SelB = -1; Invalidate(); ed.UpdInfo();
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (!drag) return;
+            double t = T(e.X); ed.SelA = Math.Min(dragT0, t); ed.SelB = Math.Max(dragT0, t); Invalidate(); ed.UpdInfo();
+        }
+        protected override void OnMouseUp(MouseEventArgs e) { drag = false; }
+        protected override void OnPaint(PaintEventArgs pe)
+        {
+            var g = pe.Graphics; g.SmoothingMode = SmoothingMode.None;
+            int w = Width - 2 * M; if (w < 10) return;
+            // v19: без полосы кадров (замечание db 01:10 — это копия экрана, места занимает много, пользы мало)
+            var rWv = new Rectangle(M, 10, w, Math.Max(40, Height - 40));
+            var rTh = new Rectangle(M, rWv.Y, w, 0);
+            Ui19.Screen(g, new RectangleF(rWv.X - 3, rWv.Y - 3, rWv.Width + 6, rWv.Height + 6), 10);
+            g.SmoothingMode = SmoothingMode.None;
+            using (var pen = new Pen(Theme.A(Theme.Teal, 0.12f))) g.DrawLine(pen, rWv.X, rWv.Y + rWv.Height / 2, rWv.Right, rWv.Y + rWv.Height / 2);
+            if (ed.Dur <= 0) { TextRenderer.DrawText(g, "Загружаю дорожку…", Font, rWv, Theme.Mute); return; }
+            var digF = Theme.Px(Theme.DigitFam, 12f, FontStyle.Regular);
+            int mid = rWv.Y + rWv.Height / 2;
+            using (var pk = new Pen(Theme.Teal)) using (var pc = new Pen(Theme.A(Theme.Mute, 0.5f)))
+                for (int x = 0; x < w; x++)
+                {
+                    double t0 = x / (double)w * ed.Dur, t1 = (x + 1) / (double)w * ed.Dur;
+                    float a = ed.PeakAt(t0, t1); int h = (int)(a * (rWv.Height / 2 - 4));
+                    g.DrawLine(ed.IsCut(t0) ? pc : pk, M + x, mid - h, M + x, mid + h);
+                }
+            using (var b = new HatchBrush(HatchStyle.WideUpwardDiagonal, Theme.A(Theme.Red, 0.55f), Theme.A(Color.Black, 0.55f)))
+                foreach (var c in ed.Cuts) { float x0 = X(c[0]), x1 = X(c[1]); g.FillRectangle(b, x0, rTh.Y, x1 - x0, rWv.Bottom - rTh.Y); }
+            if (ed.SelA >= 0 && ed.SelB > ed.SelA)
+            {
+                float x0 = X(ed.SelA), x1 = X(ed.SelB);
+                using (var b = new SolidBrush(Theme.A(Theme.TealHi, 0.22f))) g.FillRectangle(b, x0, rTh.Y, x1 - x0, rWv.Bottom - rTh.Y);
+                using (var p = new Pen(Theme.TealHi)) { g.DrawLine(p, x0, rTh.Y, x0, rWv.Bottom); g.DrawLine(p, x1, rTh.Y, x1, rWv.Bottom); }
+            }
+            Ui19.Gloss(g, rWv, 10);
+            using (var p = new Pen(Theme.Amber, 1.5f)) { float hx = X(ed.Head); g.DrawLine(p, hx, rTh.Y - 4, hx, rWv.Bottom + 4); }
+            // шкала времени
+            double step = ed.Dur <= 20 ? 1 : ed.Dur <= 60 ? 5 : ed.Dur <= 300 ? 15 : 60;
+            for (double t = 0; t <= ed.Dur + 0.001; t += step)
+            {
+                float x = X(t); using (var p = new Pen(Theme.A(Theme.Mute, 0.5f))) g.DrawLine(p, x, rWv.Bottom, x, rWv.Bottom + 5);
+                TextRenderer.DrawText(g, Ui19.Fmt(t).Substring(0, 5), digF, new Point((int)x + 2, rWv.Bottom + 4), Theme.A(Theme.Teal, 0.7f));
+            }
+        }
+    }
+
     class AboutForm : Form
     {
-        public const string Version = "v18";
+        public const string Version = "v19";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -2678,7 +3181,7 @@ namespace XyzRecorder
             bool hc = Hot == "close";
             using (var p = Theme.Round(closeR, 14 * s))
             {
-                using (var b = new SolidBrush(hc ? Color.FromArgb(closeDown ? 70 : 44, 95, 211, 192) : Color.FromArgb(14, 255, 255, 255))) g.FillPath(b, p);
+                using (var b = new SolidBrush(hc ? Theme.A(Theme.Teal, (closeDown ? 70 : 44) / 255f) : Color.FromArgb(14, 255, 255, 255))) g.FillPath(b, p);
                 using (var pen = new Pen(Theme.A(Theme.Teal, hc ? 0.95f : 0.6f), Math.Max(1f, 1.1f * s))) g.DrawPath(pen, p);
             }
             using (var sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
@@ -2795,6 +3298,7 @@ namespace XyzRecorder
             }
             foldRec = cfg.Get("foldRec", "0") == "1";
             skinFrame = cfg.Get("skin", "body") == "frame";
+            Theme.ApplyPal(cfg.Get("palette", "mint"));   // v19
             ui.SkinK = skinFrame ? 1f : 0f; ui.Lever2 = skinFrame ? 0f : 1f;
             Current = this;
             TopMost = cfg.Get("top", "0") == "1";
@@ -3244,6 +3748,22 @@ namespace XyzRecorder
             var sk1 = new ToolStripMenuItem("Облик «Рамка» (без корпуса)") { Checked = skinFrame };
             sk1.ToolTipText = "То же, что тумблер «Облик»: вверх — корпус, вниз — рамка.";
             sk1.Click += (o, e) => ToggleSkin();
+            var aft = new ToolStripMenuItem("После записи");   // v19
+            foreach (var kv in new[] { new[] { "toast", "Показать окошко «Сохранено»" }, new[] { "folder", "Открыть папку" }, new[] { "none", "Ничего не делать" } })
+            {
+                var key = kv[0];
+                var it = new ToolStripMenuItem(kv[1]) { Checked = cfg.Get("afterRec", "toast") == key };
+                it.Click += (o, e) => { cfg.Set("afterRec", key); cfg.Save(); };
+                aft.DropDownItems.Add(it);
+            }
+            var pal = new ToolStripMenuItem("Цвет облика");   // v19
+            foreach (var p in Theme.Pals)
+            {
+                var pp = p;
+                var it = new ToolStripMenuItem(p.Name) { Checked = Theme.Cur.Id == p.Id };
+                it.Click += (o, e) => { Theme.ApplyPal(pp.Id); cfg.Set("palette", pp.Id); cfg.Save(); Invalidate(); try { Refresh(); } catch { } };
+                pal.DropDownItems.Add(it);
+            }
             var t1 = new ToolStripMenuItem("Выключить (в трей)"); t1.Click += (o, e) => PowerOff();
             var x1 = new ToolStripMenuItem("Выход"); x1.Click += (o, e) => ExitApp();
             var cm = new ToolStripMenuItem("Компактный режим") { Checked = compact };
@@ -3252,7 +3772,7 @@ namespace XyzRecorder
             var rw = new ToolStripMenuItem("Открыть исходники"); rw.ToolTipText = "Записи до «Улучшить голос» (хранятся 7 дней).";
             rw.Click += (o, e) => { try { Directory.CreateDirectory(Engine.RawDir); Process.Start("explorer.exe", "\"" + Engine.RawDir + "\""); } catch { } };
             var ab = new ToolStripMenuItem("О программе…"); ab.Click += (o, e) => BeginInvoke(new Action(ShowAbout));
-            m.Items.AddRange(new ToolStripItem[] { cm, new ToolStripSeparator(), f1, f2, rw, new ToolStripSeparator(), VoiceItem(), new ToolStripSeparator(), r1, r2, new ToolStripSeparator(), sk1, c1, c2, new ToolStripSeparator(), t1, ab, x1 });
+            m.Items.AddRange(new ToolStripItem[] { cm, new ToolStripSeparator(), f1, f2, rw, new ToolStripSeparator(), VoiceItem(), new ToolStripSeparator(), r1, r2, aft, new ToolStripSeparator(), sk1, pal, c1, c2, new ToolStripSeparator(), t1, ab, x1 });
             return m;
         }
 
@@ -3690,7 +4210,12 @@ namespace XyzRecorder
                            : "Сохранено: " + Path.GetFileName(outFile);
                 SetStatus(msg, voice == -1);
                 if (!Visible && tray != null) try { tray.ShowBalloonTip(3000, "XYZ Запись", msg, voice == -1 ? ToolTipIcon.Warning : ToolTipIcon.None); } catch { }
-                if (!Program.SelfTestMode) try { Process.Start("explorer.exe", "/select,\"" + outFile + "\""); } catch { }
+                if (!Program.SelfTestMode)
+                {
+                    string after = cfg.Get("afterRec", "toast");   // v19: toast — окошко «Сохранено», folder — открыть папку, none — ничего
+                    if (after == "folder") { try { Process.Start("explorer.exe", "/select,\"" + outFile + "\""); } catch { } }
+                    else if (after == "toast") { try { var tf = new SavedToast(outFile, msg, voice == -1, !showInRec); tf.Show(); } catch { } }
+                }
             }
             else
             {
@@ -3887,6 +4412,8 @@ namespace XyzRecorder
                 string k = args[i].Trim().ToLower();
                 if (k == "--snapshot-compact") return Snapshot11("compact");
                 if (k == "--snapshot-about") return Snapshot11("about");
+                if (k == "--snapshot-palettes") return SnapshotPalettes();   // v19
+                if (k == "--snapshot-toast") return SnapshotToast(i + 1 < args.Length ? args[i + 1] : "test.mp4");   // v19
                 if (k == "--snapshot-region") return Snapshot11("region");
                 if (k == "--regiontest") return RegionTest(i + 1 < args.Length ? args[i + 1] : "100,100,640,360");
                 if (k == "--capturetest") return CaptureTest(i + 1 < args.Length ? args[i + 1].Trim().ToLower() : "full", i + 2 < args.Length ? args[i + 2] : null);   // v13
@@ -3911,6 +4438,71 @@ namespace XyzRecorder
         static void Save(Bitmap b, string dir, string name) { if (b == null) return; b.Save(Path.Combine(dir, name), ImageFormat.Png); b.Dispose(); }
 
         // Ключ --snapshot (v8): кадры прибора в test\v8_*.png (окно не показывается), кадр ARGB с прозрачностью.
+        static int SnapshotToast(string mp4)   // v19: окошко «Сохранено» и «Обрезать» в каждом облике — в PNG
+        {
+            string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", "toast19");
+            Directory.CreateDirectory(dir);
+            var log = new StringBuilder();
+            foreach (var id in new[] { "mint", "noir", "blackred" })
+            {
+                try
+                {
+                    Theme.ApplyPal(id);
+                    foreach (var frm in new Form[] { new SavedToast(mp4, "Сохранено", false, false), new TrimForm(mp4) })
+                    {
+                        using (frm)
+                        {
+                            frm.StartPosition = FormStartPosition.Manual; frm.Opacity = 0.01; frm.Show(); Application.DoEvents();
+                            frm.Location = new Point(-5000, -5000); frm.Opacity = 1; frm.Refresh(); Application.DoEvents(); Thread.Sleep(150); Application.DoEvents();
+                            var tfm = frm as TrimForm;
+                            if (tfm != null)
+                            {
+                                for (int w8 = 0; w8 < 100 && (!tfm.Ready); w8++) { Thread.Sleep(100); Application.DoEvents(); }
+                                double D = tfm.Dur; tfm.Cuts.Add(new[] { D * 0.05, D * 0.15 }); tfm.SelA = D * 0.55; tfm.SelB = D * 0.7; tfm.Head = D * 0.55; tfm.UpdInfo();
+                                frm.Refresh(); Application.DoEvents();
+                            }
+                            using (var bm = new Bitmap(frm.Width, frm.Height)) { frm.DrawToBitmap(bm, new Rectangle(0, 0, frm.Width, frm.Height)); bm.Save(Path.Combine(dir, id + (frm is TrimForm ? "_trim.png" : "_toast.png"))); }
+                            frm.Close();
+                        }
+                    }
+                    log.AppendLine("ok " + id);
+                }
+                catch (Exception ex) { log.AppendLine("ERR " + id + " " + ex); }
+            }
+            File.WriteAllText(Path.Combine(dir, "toast.log"), log.ToString());
+            return 0;
+        }
+
+        static int SnapshotPalettes()   // v19: каждый облик — корпус в покое и при записи, рамка в покое
+        {
+            SnapshotMode = true;
+            string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", "pal19");
+            Directory.CreateDirectory(dir);
+            var log = new StringBuilder("palettes v19 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "\r\n");
+            try
+            {
+                using (var f = new MainForm())
+                {
+                    f.SnapPrep();
+                    f.SetScale(1f);
+                    foreach (var p in Theme.Pals)
+                    {
+                        Theme.ApplyPal(p.Id);
+                        f.SnapRecK = 1f;
+                        f.SnapSkin(0f, 1f);
+                        Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, p.Id + "_idle.png");
+                        Save(f.Snap(1, 1f, 1f, Hit.None, Hit.None, 0.9f, "", false, 12.8125), dir, p.Id + "_rec.png");
+                        f.SnapSkin(1f, 0f);
+                        Save(f.Snap(0, 1f, 1f, Hit.None, Hit.None, 0.28f, "", false, 10.0), dir, p.Id + "_frame.png");
+                        log.AppendLine("ok " + p.Id);
+                    }
+                }
+            }
+            catch (Exception ex) { log.AppendLine("ERR " + ex); }
+            File.WriteAllText(Path.Combine(dir, "palettes.log"), log.ToString());
+            return 0;
+        }
+
         static int Snapshot()
         {
             SnapshotMode = true;
