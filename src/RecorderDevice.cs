@@ -2900,7 +2900,7 @@ namespace XyzRecorder
             var bOpen = Ui19.Btn("Открыть ролик", false); bOpen.Click += (o, e) => { try { Process.Start(file); } catch { } };
             top.Controls.AddRange(new Control[] { bPlay, bCut, bUndo, bSave, bOpen });
             info = new Label { Dock = DockStyle.Bottom, Height = 30, ForeColor = Theme.Mute, Padding = new Padding(6, 8, 6, 0), BackColor = Color.Transparent, Font = Theme.Px(Theme.UiFam, 12.5f, FontStyle.Regular),
-                Text = "Выделите кусок мышью на дорожке. Пробел — прослушать, Delete — вырезать, Ctrl+Z — вернуть. Оригинал не меняется." };
+                Text = "Выделите кусок мышью — края прилипают к паузам (Alt — без прилипания), края выделения можно двигать. Пробел — слушать, Delete — вырезать, Ctrl+Z — вернуть." };
             wave = new WavePanel(this) { Dock = DockStyle.Fill };
             Controls.Add(wave); Controls.Add(top); Controls.Add(info);
             KeyDown += OnKey;
@@ -2971,7 +2971,7 @@ namespace XyzRecorder
             info.ForeColor = Theme.Mute;
             info.Text = (HasSel ? "Выделено " + Ui19.Fmt(SelA) + " – " + Ui19.Fmt(SelB) + " (" + Ui19.Fmt(SelB - SelA) + ")   ·   " : "")
                 + "Вырезано кусков: " + Cuts.Count + "   ·   длина после: " + Ui19.Fmt(kept) + " из " + Ui19.Fmt(dur)
-                + "      пробел — слушать, Delete — вырезать, Ctrl+Z — вернуть";
+                + "      края — тянуть мышью, прилипают к паузам (Alt — нет) · пробел — слушать · Delete — вырезать · Ctrl+Z";
         }
         void TogglePlay()
         {
@@ -3047,7 +3047,7 @@ namespace XyzRecorder
 
     class WavePanel : Panel
     {
-        readonly TrimForm ed; bool drag; double dragT0;
+        readonly TrimForm ed; bool drag; double dragT0; int edge;   // edge: 0 — новое выделение, 1 — тянем начало, 2 — тянем конец
         public WavePanel(TrimForm e)
         {
             ed = e; DoubleBuffered = true; ResizeRedraw = true; BackColor = Color.Transparent; Cursor = Cursors.IBeam;
@@ -3056,15 +3056,44 @@ namespace XyzRecorder
         const int M = 14, TH = 72;
         double T(int x) { double w = Math.Max(1, Width - 2 * M); return Math.Max(0, Math.Min(ed.Dur, (x - M) / w * ed.Dur)); }
         float X(double t) { return (float)(M + (ed.Dur <= 0 ? 0 : t / ed.Dur) * (Width - 2 * M)); }
+        int EdgeAt(int x)
+        {
+            if (ed.SelA < 0 || ed.SelB <= ed.SelA) return 0;
+            if (Math.Abs(x - X(ed.SelA)) <= 6) return 1;
+            if (Math.Abs(x - X(ed.SelB)) <= 6) return 2;
+            return 0;
+        }
+        // прилипание: к тишине рядом (пауза между словами), к краям вырезанных кусков; Alt — без прилипания
+        double Snap(double t)
+        {
+            if ((ModifierKeys & Keys.Alt) == Keys.Alt || ed.Dur <= 0) return t;
+            double px = ed.Dur / Math.Max(1, Width - 2 * M);
+            foreach (var c in ed.Cuts) { if (Math.Abs(t - c[0]) < 6 * px) return c[0]; if (Math.Abs(t - c[1]) < 6 * px) return c[1]; }
+            double win = Math.Max(0.12, 10 * px), best = t; float bestV = float.MaxValue, loud = 0.0001f;
+            for (double q = t - win; q <= t + win; q += 0.01)
+            {
+                if (q < 0 || q > ed.Dur) continue;
+                float v = ed.PeakAt(q - 0.025, q + 0.025); if (v > loud) loud = v;
+                float w = v + (float)(Math.Abs(q - t) / win) * 0.02f;
+                if (w < bestV) { bestV = w; best = q; }
+            }
+            return ed.PeakAt(best - 0.025, best + 0.025) < Math.Max(0.02f, loud * 0.15f) ? best : t;
+        }
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left || ed.Dur <= 0) return;
-            drag = true; dragT0 = T(e.X); ed.Head = dragT0; ed.SelA = ed.SelB = -1; Invalidate(); ed.UpdInfo();
+            drag = true; edge = EdgeAt(e.X);
+            if (edge == 0) { dragT0 = Snap(T(e.X)); ed.Head = dragT0; ed.SelA = ed.SelB = -1; }
+            Invalidate(); ed.UpdInfo();
         }
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            if (!drag) return;
-            double t = T(e.X); ed.SelA = Math.Min(dragT0, t); ed.SelB = Math.Max(dragT0, t); Invalidate(); ed.UpdInfo();
+            if (!drag) { Cursor = EdgeAt(e.X) != 0 ? Cursors.SizeWE : Cursors.IBeam; return; }
+            double t = Snap(T(e.X));
+            if (edge == 1) { ed.SelA = Math.Min(t, ed.SelB - 0.05); }
+            else if (edge == 2) { ed.SelB = Math.Max(t, ed.SelA + 0.05); }
+            else { ed.SelA = Math.Min(dragT0, t); ed.SelB = Math.Max(dragT0, t); }
+            Invalidate(); ed.UpdInfo();
         }
         protected override void OnMouseUp(MouseEventArgs e) { drag = false; }
         protected override void OnPaint(PaintEventArgs pe)
