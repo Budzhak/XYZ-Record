@@ -117,6 +117,7 @@ namespace XyzRecorder
         [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h, IntPtr dc);
         [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr dc);
         [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
+        [DllImport("shell32.dll")] public static extern void SHChangeNotify(int eventId, int flags, IntPtr item1, IntPtr item2);
         [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
         [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr o);
         [DllImport("gdi32.dll")] public static extern bool GdiFlush();
@@ -2862,7 +2863,7 @@ namespace XyzRecorder
             var row = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, BackColor = Color.Transparent, WrapContents = false };
             var bOpen = Ui19.Btn("Открыть", true); bOpen.Click += (o, e) => { try { Process.Start(file); } catch { } Close(); };
             var bDir = Ui19.Btn("Папка", false); bDir.Click += (o, e) => { try { Process.Start("explorer.exe", "/select,\"" + file + "\""); } catch { } Close(); };
-            var bCut = Ui19.Btn("Обрезать…", false); bCut.Click += (o, e) => { Hide(); using (var f = new TrimForm(file)) f.ShowDialog(); Close(); };
+            var bCut = Ui19.Btn("Обрезать…", false); bCut.Click += (o, e) => { TrimFiles.Launch(file); Close(); };   // v19.5: редактор — отдельным процессом, прибор свободен
             row.Controls.AddRange(new Control[] { bOpen, bDir, bCut });
             col.Controls.AddRange(new Control[] { t3, t2, row });
             col.Location = new Point(12, HeadH + 6);   // под шапкой
@@ -2876,12 +2877,291 @@ namespace XyzRecorder
         protected override void Dispose(bool d) { if (d) life.Dispose(); base.Dispose(d); }
     }
 
+    // v19.8: показ нажатий в ролике — во время записи ловим сочетания клавиш и щелчки мыши
+    // (обычный набор текста НЕ записывается — только Ctrl/Alt/Win + клавиша и служебные: Esc, Tab, Enter, Del, Backspace, F1–F12),
+    // после «Стоп» ffmpeg рисует их поверх видео: табличка слева внизу и кружки на месте щелчка. На экране у пользователя ничего нет.
+    static class KeyLog
+    {
+        public class Ev { public double T; public string Text; public int X, Y, Kind; }   // Kind: 0 — клавиши, 1 — левая, 2 — правая, 3 — средняя
+        public static readonly List<Ev> Events = new List<Ev>();
+        // v19.9: хуки — на своём потоке с циклом сообщений (на занятом UI-потоке прибора они тормозили мышь у всей системы,
+        // а Windows молча снимала клавиатурный хук по таймауту). Время — свой секундомер, без обращений к окну.
+        static readonly Stopwatch clk = new Stopwatch(); static double accT = 0; static volatile bool active;
+        static double Clock() { return accT + clk.Elapsed.TotalSeconds; }
+        public static void Pause() { if (clk.IsRunning) { accT += clk.Elapsed.TotalSeconds; clk.Reset(); } active = false; }
+        public static void Resume() { clk.Restart(); active = true; }
+        static Thread hookThread; static uint hookTid;
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] static extern bool PostThreadMessage(uint tid, uint msg, IntPtr w, IntPtr l);
+        [StructLayout(LayoutKind.Sequential)] struct MSG { public IntPtr h; public uint m; public IntPtr w, l; public uint t; public int x, y; }
+        [DllImport("user32.dll")] static extern int GetMessage(out MSG m, IntPtr h, uint a, uint b);
+        public static bool Keys = true, Halo = true;   // что ловить: сочетания и щелчки / подсветка курсора
+        public static readonly List<Ev> Moves = new List<Ev>();   // положение курсора для подсветки (не чаще 15 раз в секунду)
+        static double lastMove = -1;
+        static IntPtr hk = IntPtr.Zero, hm = IntPtr.Zero;
+        delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
+        static HookProc kp = KbProc, mp = MsProc;   // держим ссылки — иначе сборщик мусора уберёт делегаты
+        [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint tid);
+        [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr h);
+        [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
+        [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+        [DllImport("user32.dll")] static extern int GetKeyNameText(int lParam, StringBuilder s, int n);
+        [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string n);
+        public static void Start()
+        {
+            lock (Events) Events.Clear(); lock (Moves) Moves.Clear(); lastMove = -1;
+            accT = 0; clk.Reset(); Resume();
+            if (hookThread != null) return;
+            var ready = new ManualResetEvent(false);
+            hookThread = new Thread(() =>
+            {
+                hookTid = GetCurrentThreadId();
+                hk = SetWindowsHookEx(13, kp, GetModuleHandle(null), 0);
+                if (Halo || Keys) hm = SetWindowsHookEx(14, mp, GetModuleHandle(null), 0);
+                ready.Set();
+                MSG m; while (GetMessage(out m, IntPtr.Zero, 0, 0) > 0) { }
+                if (hk != IntPtr.Zero) { UnhookWindowsHookEx(hk); hk = IntPtr.Zero; }
+                if (hm != IntPtr.Zero) { UnhookWindowsHookEx(hm); hm = IntPtr.Zero; }
+            });
+            hookThread.IsBackground = true; hookThread.Priority = ThreadPriority.Highest; hookThread.Start();
+            ready.WaitOne(2000);
+        }
+        public static void Stop()
+        {
+            Pause();
+            if (hookThread != null) { PostThreadMessage(hookTid, 0x0012, IntPtr.Zero, IntPtr.Zero); hookThread.Join(1000); hookThread = null; }
+        }
+        static bool Down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+        static string Name(int vk, int scan)
+        {
+            if (vk >= 0x41 && vk <= 0x5A) return ((char)vk).ToString();
+            if (vk >= 0x30 && vk <= 0x39) return ((char)vk).ToString();
+            if (vk >= 0x70 && vk <= 0x87) return "F" + (vk - 0x6F);
+            switch (vk)
+            {
+                case 0x1B: return "Esc"; case 0x09: return "Tab"; case 0x0D: return "Enter"; case 0x2E: return "Del"; case 0x08: return "Backspace";
+                case 0x20: return "Пробел"; case 0x25: return "←"; case 0x26: return "↑"; case 0x27: return "→"; case 0x28: return "↓";
+                case 0x24: return "Home"; case 0x23: return "End"; case 0x21: return "PgUp"; case 0x22: return "PgDn"; case 0x2D: return "Ins";
+            }
+            var sb = new StringBuilder(32); GetKeyNameText(scan << 16, sb, 32); return sb.Length > 0 ? sb.ToString() : "#" + vk;
+        }
+        static IntPtr KbProc(int code, IntPtr w, IntPtr l)
+        {
+            try
+            {
+                int msg = w.ToInt32();
+                if (code >= 0 && Keys && active && (msg == 0x100 || msg == 0x104))
+                {
+                    int vk = Marshal.ReadInt32(l), scan = Marshal.ReadInt32(l, 4);
+                    bool isMod = vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C || (vk >= 0xA0 && vk <= 0xA5);
+                    if (!isMod && vk != 0x78)   // F9 — наша клавиша записи
+                    {
+                        bool c = Down(0x11), a = Down(0x12), wn = Down(0x5B) || Down(0x5C), sh = Down(0x10);
+                        bool special = vk == 0x1B || vk == 0x09 || vk == 0x0D || vk == 0x2E || vk == 0x08 || (vk >= 0x70 && vk <= 0x7B);
+                        if (c || a || wn || special)
+                        {
+                            string t = (c ? "Ctrl + " : "") + (a ? "Alt + " : "") + (wn ? "Win + " : "") + (sh ? "Shift + " : "") + Name(vk, scan);
+                            double now = Clock();
+                            lock (Events) Events.Add(new Ev { T = now, Text = t, Kind = 0 });
+                        }
+                    }
+                }
+            }
+            catch { }
+            return CallNextHookEx(hk, code, w, l);
+        }
+        static IntPtr MsProc(int code, IntPtr w, IntPtr l)
+        {
+            try
+            {
+                int msg = w.ToInt32();
+                if (code >= 0 && Halo && active && msg == 0x200)
+                {
+                    double now = Clock();
+                    if (now - lastMove >= 0.033) { lastMove = now; lock (Moves) Moves.Add(new Ev { T = now, X = Marshal.ReadInt32(l), Y = Marshal.ReadInt32(l, 4) }); }
+                }
+                if (code >= 0 && Keys && active && (msg == 0x201 || msg == 0x204 || msg == 0x207))
+                {
+                    int x = Marshal.ReadInt32(l), y = Marshal.ReadInt32(l, 4);
+                    double now = Clock();
+                    lock (Events) Events.Add(new Ev { T = now, X = x, Y = y, Kind = msg == 0x201 ? 1 : msg == 0x204 ? 2 : 3 });
+                }
+            }
+            catch { }
+            return CallNextHookEx(hm, code, w, l);
+        }
+        static string Esc(string p) { return p.Replace("\\", "/").Replace(":", "\\:").Replace("'", "\\'"); }
+        static string Png(string dir, string name, Bitmap b) { string f = Path.Combine(dir, name); b.Save(f, ImageFormat.Png); b.Dispose(); return f; }
+        static Bitmap Label(string text, int fs)
+        {
+            using (var font = new Font("Segoe UI", fs, FontStyle.Bold, GraphicsUnit.Pixel))
+            {
+                Size sz; using (var tmp = new Bitmap(1, 1)) using (var g0 = Graphics.FromImage(tmp)) sz = Size.Ceiling(g0.MeasureString(text, font));
+                int pad = fs / 2, w = sz.Width + pad * 2, h = sz.Height + pad;
+                var bm = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(bm))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                    using (var gp = new GraphicsPath()) { int r = h / 3; gp.AddArc(0, 0, r * 2, r * 2, 180, 90); gp.AddArc(w - 1 - r * 2, 0, r * 2, r * 2, 270, 90); gp.AddArc(w - 1 - r * 2, h - 1 - r * 2, r * 2, r * 2, 0, 90); gp.AddArc(0, h - 1 - r * 2, r * 2, r * 2, 90, 90); gp.CloseFigure();
+                        using (var br = new SolidBrush(Color.FromArgb(205, 20, 24, 28))) g.FillPath(br, gp);
+                        using (var pn = new Pen(Color.FromArgb(200, 120, 220, 200), Math.Max(2, fs / 14))) g.DrawPath(pn, gp); }
+                    using (var br = new SolidBrush(Color.White)) g.DrawString(text, font, br, pad, pad / 2);
+                }
+                return bm;
+            }
+        }
+        static Bitmap Disc(int d, Color c, bool fill)
+        {
+            var bm = new Bitmap(d, d, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bm))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias; float t = Math.Max(3, d / 10f);
+                if (fill) using (var br = new SolidBrush(c)) g.FillEllipse(br, 1, 1, d - 3, d - 3);
+                else using (var pn = new Pen(c, t)) g.DrawEllipse(pn, t / 2 + 1, t / 2 + 1, d - t - 3, d - t - 3);
+            }
+            return bm;
+        }
+        // Наложить нажатия на готовый ролик (в ffmpeg программы нет drawtext — таблички и круги рисуем PNG и накладываем overlay,
+        // положение кругов меняет sendcmd). cap — область захвата (экранные координаты) для пересчёта точек.
+        public static bool Burn(string ff, string inFile, string outFile, Rectangle cap, string work, Action<string> log, out string err)
+        {
+            err = null; List<Ev> ev; lock (Events) ev = new List<Ev>(Events); List<Ev> mv; lock (Moves) mv = new List<Ev>(Moves);
+            if (ev.Count == 0 && mv.Count == 0) { err = "нет событий"; return false; }
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            string dir = Path.Combine(work, "keys"); Directory.CreateDirectory(dir);
+            int H = Math.Max(240, cap.Height), fs = Math.Max(24, H / 24), rd = Math.Max(40, H / 14), hd = Math.Max(36, H / 18);
+            var cmds = new List<KeyValuePair<double, string>>();
+            var g = new StringBuilder(); g.Append("[0:v]sendcmd=f='").Append(Esc(Path.Combine(dir, "cmd.txt"))).Append("'[v0];\n");
+            int vi = 0, n = 0;
+            Action<string, string> ov = (png, opts) => { g.AppendFormat("movie='{0}'[m{1}];\n[v{1}][m{1}]overlay{2}[v{3}];\n", Esc(png), vi, opts, vi + 1); vi++; };
+            if (mv.Count > 0)
+            {
+                ov(Png(dir, "halo.png", Disc(hd, Color.FromArgb(85, 255, 235, 59), true)), "@halo=x=-2000:y=-2000:eof_action=repeat");
+                foreach (var m in mv) cmds.Add(new KeyValuePair<double, string>(m.T, string.Format(inv, "overlay@halo x {0}, overlay@halo y {1};", m.X - cap.X - hd / 2, m.Y - cap.Y - hd / 2)));
+                n++;
+            }
+            var cols = new[] { Color.Empty, Color.FromArgb(235, 255, 213, 79), Color.FromArgb(235, 255, 82, 82), Color.FromArgb(235, 100, 181, 246) };
+            for (int k = 1; k <= 3; k++)
+            {
+                var cl = ev.FindAll(e => e.Kind == k); if (cl.Count == 0) continue;
+                ov(Png(dir, "ring" + k + ".png", Disc(rd, cols[k], false)), "@r" + k + "=x=-2000:y=-2000:eof_action=repeat");
+                foreach (var e in cl)
+                {
+                    cmds.Add(new KeyValuePair<double, string>(e.T, string.Format(inv, "overlay@r{0} x {1}, overlay@r{0} y {2};", k, e.X - cap.X - rd / 2, e.Y - cap.Y - rd / 2)));
+                    cmds.Add(new KeyValuePair<double, string>(e.T + 0.45, string.Format(inv, "overlay@r{0} x -2000;", k)));
+                    n++;
+                }
+            }
+            var keys = ev.FindAll(e => e.Kind == 0);
+            var byText = new Dictionary<string, List<double[]>>();
+            for (int i = 0; i < keys.Count; i++)
+            {
+                var e = keys[i]; double t1 = e.T + 1.5; if (i + 1 < keys.Count) t1 = Math.Min(t1, keys[i + 1].T); if (t1 < e.T + 0.25) t1 = e.T + 0.25;
+                List<double[]> l; if (!byText.TryGetValue(e.Text, out l)) byText[e.Text] = l = new List<double[]>(); l.Add(new[] { e.T, t1 });
+            }
+            int li = 0;
+            foreach (var kv in byText)
+            {
+                var en = new StringBuilder(); foreach (var iv in kv.Value) { if (en.Length > 0) en.Append('+'); en.AppendFormat(inv, "between(t,{0:0.###},{1:0.###})", iv[0], iv[1]); }
+                ov(Png(dir, "k" + (li++) + ".png", Label(kv.Key, fs)), string.Format(inv, "=x=(W-w)/2:y=H-h-{0}:eof_action=repeat:enable='{1}'", fs, en));
+                n += kv.Value.Count;
+            }
+            if (n == 0) { err = "нет событий в кадре"; return false; }
+            cmds.Sort((x, y) => x.Key.CompareTo(y.Key));
+            var cs = new StringBuilder(); foreach (var c in cmds) cs.AppendFormat(inv, "{0:0.###} {1}\n", c.Key, c.Value);
+            if (cs.Length == 0) cs.Append("0 overlay@none x 0;\n");
+            File.WriteAllText(Path.Combine(dir, "cmd.txt"), cs.ToString(), new UTF8Encoding(false));
+            string gs = g.ToString(); gs = gs.Substring(0, gs.LastIndexOf("[v" + vi + "];")) + "[vout]";
+            string script = Path.Combine(dir, "graph.txt"); File.WriteAllText(script, gs, new UTF8Encoding(false));
+            string args = "-hide_banner -y -i \"" + inFile + "\" -filter_complex_script \"" + script + "\" -map \"[vout]\" -map 0:a? -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -c:a copy -movflags +faststart \"" + outFile + "\"";
+            try
+            {
+                var psi = new ProcessStartInfo(ff, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+                string tail;
+                using (var p = Process.Start(psi)) { tail = p.StandardError.ReadToEnd(); p.WaitForExit(); if (p.ExitCode != 0 || !File.Exists(outFile)) { err = tail.Length > 800 ? tail.Substring(tail.Length - 800) : tail; return false; } }
+                if (log != null) log("=== нажатия/курсор: " + n + " меток наложено");
+                return true;
+            }
+            catch (Exception ex) { err = ex.Message; return false; }
+        }
+        // проверка без записи: --keystest <mp4> — придуманные события на первые 3 с
+        public static int SelfTest(string mp4)
+        {
+            string ff = Engine.FindFfmpeg(); var cap = new Rectangle(0, 0, 2560, 1440);
+            lock (Events) { Events.Clear(); Events.Add(new Ev { T = 0.5, Text = "Ctrl + Z", Kind = 0 }); Events.Add(new Ev { T = 1.2, Text = "Esc", Kind = 0 }); Events.Add(new Ev { T = 1.0, X = 800, Y = 500, Kind = 1 }); Events.Add(new Ev { T = 1.8, X = 1200, Y = 700, Kind = 2 }); }
+            lock (Moves) { Moves.Clear(); for (int i = 0; i < 40; i++) Moves.Add(new Ev { T = i * 0.066, X = 600 + i * 20, Y = 400 + i * 8 }); }
+            string work = Path.Combine(Path.GetTempPath(), "xyz_keystest"); Directory.CreateDirectory(work);
+            string cut = Path.Combine(work, "in.mp4"), outF = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", "keystest.mp4");
+            Directory.CreateDirectory(Path.GetDirectoryName(outF));
+            using (var p = Process.Start(new ProcessStartInfo(ff, "-hide_banner -y -t 3 -i \"" + mp4 + "\" -c copy \"" + cut + "\"") { UseShellExecute = false, CreateNoWindow = true })) p.WaitForExit(30000);
+            string err; bool ok = Burn(ff, cut, outF, cap, work, null, out err);
+            File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", "keystest.log"), (ok ? "ok" : "ERR " + err) + "\r\n" + File.ReadAllText(Path.Combine(work, "keys", "graph.txt")));
+            return ok ? 0 : 1;
+        }
+    }
+
+    // v19.4: ролик с диска в «Обрезать» и пункт в меню Проводника (HKCU, без прав администратора)
+    static class TrimFiles
+    {
+        static readonly string[] Ext = { ".mp4", ".mkv", ".mov", ".avi", ".webm" };
+        const string Key = @"Software\Classes\SystemFileAssociations\{0}\shell\XYZTrim";
+        const string Prog = "XYZRecord.Trim";
+        public static void Launch(string f)
+        {
+            try { Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--trim \"" + f + "\"") { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(Application.ExecutablePath) }); }
+            catch (Exception ex) { MessageBox.Show("Не удалось открыть редактор: " + ex.Message, "XYZ Запись"); }
+        }
+        public static bool IsVideo(string f) { try { return Array.IndexOf(Ext, Path.GetExtension(f).ToLower()) >= 0; } catch { return false; } }
+        public static bool ShellOn()
+        {
+            try { using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(string.Format(Key, ".mp4") + "\\command")) return k != null; } catch { return false; }
+        }
+        public static string SetShell(bool on)
+        {
+            try
+            {
+                string exe = Application.ExecutablePath;
+                foreach (var e in Ext)
+                {
+                    string kp = string.Format(Key, e);
+                    if (!on)
+                    {
+                        Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(kp, false);
+                        try { using (var ow = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Classes\" + e + @"\OpenWithProgids", true)) if (ow != null) ow.DeleteValue(Prog, false); } catch { }
+                        continue;
+                    }
+                    // v19.5: ещё и «Открыть с помощью → XYZ Запись — обрезать» (видно в первом меню Windows 11)
+                    using (var ow = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Classes\" + e + @"\OpenWithProgids")) ow.SetValue(Prog, new byte[0], Microsoft.Win32.RegistryValueKind.None);
+                    using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(kp))
+                    {
+                        k.SetValue("", "Обрезать в XYZ Запись"); k.SetValue("Icon", "\"" + exe + "\",0");
+                        using (var c = k.CreateSubKey("command")) c.SetValue("", "\"" + exe + "\" --trim \"%1\"");
+                    }
+                }
+                if (on)
+                    using (var pk = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Classes\" + Prog))
+                    {
+                        pk.SetValue("", "Видео — обрезать в XYZ Запись");
+                        using (var di = pk.CreateSubKey("DefaultIcon")) di.SetValue("", "\"" + exe + "\",0");
+                        using (var op = pk.CreateSubKey(@"shell\open")) op.SetValue("FriendlyAppName", "XYZ Запись — обрезать");
+                        using (var c = pk.CreateSubKey(@"shell\open\command")) c.SetValue("", "\"" + exe + "\" --trim \"%1\"");
+                    }
+                else Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\" + Prog, false);
+                try { Native.SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero); } catch { }
+                return null;
+            }
+            catch (Exception ex) { return "Не получилось изменить меню Проводника: " + ex.Message; }
+        }
+    }
+
     // v19: мини-редактор «как в Audition» — кадры ролика + звуковая дорожка; выделение мышью, пробел — прослушать, Delete — вырезать
-    class TrimForm : XyzForm
+    class TrimForm : XyzForm, IMessageFilter
     {
         readonly string file; double dur; string ff;
         float[] peaks = new float[0]; const int SR = 2000; short[] pcm = new short[0];
-        Bitmap thumbs; WavePanel wave; Label info; Control bSave;
+        Bitmap thumbs; WavePanel wave; VideoPanel video; Label info; Control bSave; Control topBar;
+        // v19.3: окно видео — кадры в памяти (JPEG), кадр под курсором / при прослушивании
+        readonly List<byte[]> frames = new List<byte[]>(); double fps = 10; public volatile bool FramesDone; Bitmap curBmp; int curIdx = -1;
         public double SelA = -1, SelB = -1, Head = 0;
         public List<double[]> Cuts = new List<double[]>();
         System.Media.SoundPlayer player; System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
@@ -2890,7 +3170,7 @@ namespace XyzRecorder
         {
             file = path; ff = Engine.FindFfmpeg();
             Text = "Обрезать — XYZ Запись · " + Path.GetFileName(path); Caption = "Обрезать  ·  " + Path.GetFileName(path);
-            StartPosition = FormStartPosition.CenterScreen; KeyPreview = true; Size = new Size(1100, 400);
+            StartPosition = FormStartPosition.CenterScreen; KeyPreview = true; Size = new Size(1100, 860); MinimumSize = new Size(700, 520);
             tmpDir = Path.Combine(Path.GetTempPath(), "xyz_trim_" + Guid.NewGuid().ToString("N").Substring(0, 8)); Directory.CreateDirectory(tmpDir);
             var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(2, 2, 2, 4), WrapContents = false, BackColor = Color.Transparent };
             var bPlay = Ui19.Btn("▶ Прослушать (пробел)", false); bPlay.Click += (o, e) => TogglePlay();
@@ -2898,16 +3178,70 @@ namespace XyzRecorder
             var bUndo = Ui19.Btn("↶ Отменить (Ctrl+Z)", false); bUndo.Click += (o, e) => Undo();
             bSave = Ui19.Btn("Сохранить копию", true); bSave.Click += (o, e) => Save();
             var bOpen = Ui19.Btn("Открыть ролик", false); bOpen.Click += (o, e) => { try { Process.Start(file); } catch { } };
-            top.Controls.AddRange(new Control[] { bPlay, bCut, bUndo, bSave, bOpen });
+            top.Controls.AddRange(new Control[] { bPlay, bCut, bUndo, bSave, bOpen }); topBar = top;
             info = new Label { Dock = DockStyle.Bottom, Height = 30, ForeColor = Theme.Mute, Padding = new Padding(6, 8, 6, 0), BackColor = Color.Transparent, Font = Theme.Px(Theme.UiFam, 12.5f, FontStyle.Regular),
                 Text = "Выделите кусок мышью — края прилипают к паузам (Alt — без прилипания), края выделения можно двигать. Пробел — слушать, Delete — вырезать, Ctrl+Z — вернуть." };
             wave = new WavePanel(this) { Dock = DockStyle.Fill };
-            Controls.Add(wave); Controls.Add(top); Controls.Add(info);
+            video = new VideoPanel(this) { Dock = DockStyle.Top, Height = 560 };
+            Controls.Add(wave); Controls.Add(video); Controls.Add(top); Controls.Add(info);
+            Resize += (o, e) => LayoutVideo(); Load += (o, e) => LayoutVideo();
             KeyDown += OnKey;
-            tick.Interval = 30; tick.Tick += (o, e) => { if (playing) { Head = playFrom + playSw.Elapsed.TotalSeconds; if (Head >= playTo) StopPlay(); wave.Invalidate(); } };
-            Shown += (o, e) => { Cursor = Cursors.WaitCursor; var th = new Thread(Load2); th.IsBackground = true; th.Start(); };
+            tick.Interval = 30; tick.Tick += (o, e) => { if (playing) { double et = playFrom + playSw.Elapsed.TotalSeconds; Head = ToSrc(Math.Min(et, playTo)); if (et >= playTo) StopPlay(); wave.Invalidate(); } };
+            Shown += (o, e) => { Application.AddMessageFilter(this); }; FormClosed += (o, e) => { Application.RemoveMessageFilter(this); };
+            Shown += (o, e) => { Cursor = Cursors.WaitCursor; var th = new Thread(Load2); th.IsBackground = true; th.Start(); var tf = new Thread(LoadFrames); tf.IsBackground = true; tf.Start(); };
             FormClosed += (o, e) => { StopPlay(); try { Directory.Delete(tmpDir, true); } catch { } };
         }
+        void LayoutVideo()
+        {
+            if (video == null) return;
+            int avail = ClientSize.Height - (topBar != null ? topBar.Height : 40) - (info != null ? info.Height : 30) - 60;
+            video.Height = Math.Max(120, avail - Math.Max(170, (int)(avail * 0.28)));
+        }
+        void LoadFrames()
+        {
+            try
+            {
+                double d = 0; for (int i = 0; i < 100 && (d = dur) <= 0 && !Ready; i++) Thread.Sleep(50);
+                if (d <= 0) d = Duration(file);
+                fps = d > 0 ? Math.Max(1, Math.Min(12, 2400 / d)) : 10;
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                var psi = new ProcessStartInfo(ff, "-hide_banner -v error -i \"" + file + "\" -an -vf \"fps=" + fps.ToString("0.###", inv) + ",scale='min(960,iw)':-2\" -q:v 6 -f image2pipe -vcodec mjpeg -") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+                using (var p = Process.Start(psi))
+                {
+                    var st = p.StandardOutput.BaseStream; var buf = new MemoryStream(); var rd = new byte[65536]; int n; int prev = -1;
+                    while ((n = st.Read(rd, 0, rd.Length)) > 0)
+                    {
+                        for (int i = 0; i < n; i++)
+                        {
+                            byte c = rd[i]; buf.WriteByte(c);
+                            if (prev == 0xFF && c == 0xD9) { var jb = buf.ToArray(); buf.SetLength(0); lock (frames) frames.Add(jb); prev = -1; continue; }
+                            prev = c;
+                        }
+                        if (frames.Count % 10 == 0 && video != null) try { video.BeginInvoke(new Action(() => video.Invalidate())); } catch { }
+                    }
+                    p.WaitForExit(5000);
+                }
+            }
+            catch { }
+            FramesDone = true;
+            try { video.BeginInvoke(new Action(() => video.Invalidate())); } catch { }
+        }
+        public int FramesCount { get { lock (frames) return frames.Count; } }
+        public double FramesExpected { get { return dur * fps; } }
+        public Bitmap FrameAt(double t)
+        {
+            int i; byte[] jb;
+            lock (frames)
+            {
+                if (frames.Count == 0) return null;
+                i = Math.Max(0, Math.Min(frames.Count - 1, (int)Math.Floor(t * fps)));
+                if (i == curIdx && curBmp != null) return curBmp;
+                jb = frames[i];
+            }
+            try { using (var ms = new MemoryStream(jb)) { var b = new Bitmap(Image.FromStream(ms)); if (curBmp != null) curBmp.Dispose(); curBmp = b; curIdx = i; } } catch { }
+            return curBmp;
+        }
+        public void VideoInvalidate() { if (video != null) video.Invalidate(); }
         public double Dur { get { return dur; } }
         public volatile bool Ready;
         public float[] Peaks { get { return peaks; } }
@@ -2926,6 +3260,7 @@ namespace XyzRecorder
                     Buffer.BlockCopy(b, 0, pcm, 0, pcm.Length * 2);
                 }
                 if (dur <= 0) dur = pcm.Length / (double)SR;
+                { int mx = 1; for (int i = 0; i < pcm.Length; i++) { int v = Math.Abs((int)pcm[i]); if (v > mx) mx = v; } MaxPeak = mx / 32768f; }
                 int n = 0; string tp = Path.Combine(tmpDir, "thumbs.png");
                 var p2 = new ProcessStartInfo(ff, "-hide_banner -v error -y -i \"" + file + "\" -vf \"fps=" + (n / Math.Max(0.5, dur)).ToString("0.######", System.Globalization.CultureInfo.InvariantCulture) + ",scale=-2:72,tile=" + n + "x1\" -frames:v 1 \"" + tp + "\"") { UseShellExecute = false, CreateNoWindow = true };
                 if (n > 0) using (var p = Process.Start(p2)) p.WaitForExit(60000);
@@ -2934,6 +3269,17 @@ namespace XyzRecorder
             catch { }
             Ready = true;
             try { BeginInvoke(new Action(() => { Cursor = Cursors.Default; wave.Invalidate(); UpdInfo(); })); } catch { }
+        }
+        public float MaxPeak = 1f;   // v19.5: дорожка подгоняется по самому громкому месту
+        // v19.5: колесо над дорожкой — Ctrl+колесо: громче/тише (высота волны); колесо: масштаб по времени; Shift+колесо: прокрутка
+        public bool PreFilterMessage(ref Message m)
+        {
+            if (m.Msg != 0x020A || wave == null || !wave.IsHandleCreated || !Visible) return false;
+            var pt = wave.PointToClient(Cursor.Position);
+            if (!wave.ClientRectangle.Contains(pt)) return false;
+            int delta = (short)((long)m.WParam >> 16);
+            wave.Wheel(delta, pt.X, ModifierKeys);
+            return true;
         }
         public float PeakAt(double t0, double t1)
         {
@@ -2953,9 +3299,9 @@ namespace XyzRecorder
         void CutSel()
         {
             if (!HasSel) { info.ForeColor = Theme.Amber; info.Text = "Сначала выделите кусок мышью на дорожке."; return; }
-            Cuts.Add(new[] { SelA, SelB }); SelA = SelB = -1; wave.Invalidate(); UpdInfo();
+            StopPlay(); Cuts.Add(new[] { SelA, SelB }); Head = SelB; SelA = SelB = -1; wave.Invalidate(); UpdInfo();
         }
-        void Undo() { if (Cuts.Count > 0) { Cuts.RemoveAt(Cuts.Count - 1); wave.Invalidate(); UpdInfo(); } }
+        void Undo() { if (Cuts.Count > 0) { StopPlay(); Cuts.RemoveAt(Cuts.Count - 1); SelA = SelB = -1; wave.Invalidate(); UpdInfo(); } }
         public bool IsCut(double t) { foreach (var c in Cuts) if (t >= c[0] && t < c[1]) return true; return false; }
         List<double[]> Keep()
         {
@@ -2965,27 +3311,55 @@ namespace XyzRecorder
             if (dur > cur + 0.02) res.Add(new[] { cur, dur });
             return res;
         }
+        // v19.2: дорожка «смыкается» после выреза (как Ripple Delete) — время на экране = время ролика после обрезки
+        public double EdDur { get { double s = 0; foreach (var k in Keep()) s += k[1] - k[0]; return s; } }
+        public double ToEd(double t)
+        {
+            double e = 0;
+            foreach (var k in Keep()) { if (t >= k[1]) e += k[1] - k[0]; else { if (t > k[0]) e += t - k[0]; break; } }
+            return e;
+        }
+        public double ToSrc(double e)
+        {
+            var ks = Keep(); if (ks.Count == 0) return 0;
+            foreach (var k in ks) { double len = k[1] - k[0]; if (e <= len + 1e-9) return k[0] + Math.Max(0, e); e -= len; }
+            return ks[ks.Count - 1][1];
+        }
         public void UpdInfo()
         {
             double kept = 0; foreach (var k in Keep()) kept += k[1] - k[0];
             info.ForeColor = Theme.Mute;
-            info.Text = (HasSel ? "Выделено " + Ui19.Fmt(SelA) + " – " + Ui19.Fmt(SelB) + " (" + Ui19.Fmt(SelB - SelA) + ")   ·   " : "")
+            info.Text = (HasSel ? "Выделено " + Ui19.Fmt(ToEd(SelA)) + " – " + Ui19.Fmt(ToEd(SelB)) + " (" + Ui19.Fmt(ToEd(SelB) - ToEd(SelA)) + ")   ·   " : "")
                 + "Вырезано кусков: " + Cuts.Count + "   ·   длина после: " + Ui19.Fmt(kept) + " из " + Ui19.Fmt(dur)
-                + "      края — тянуть мышью, прилипают к паузам (Alt — нет) · пробел — слушать · Delete — вырезать · Ctrl+Z";
+                + "      Delete — вырезать и сомкнуть · Ctrl+Z — вернуть · пробел — слушать · Ctrl+колесо — растянуть, колесо или полоса внизу — прокрутка, Ctrl+Shift+колесо — высота волны, выделение можно тянуть за середину";
         }
         void TogglePlay()
         {
             if (playing) { StopPlay(); return; }
-            double a = HasSel ? SelA : Head, b = HasSel ? SelB : Math.Min(dur, Head + 8);
-            if (b <= a + 0.05) { a = 0; b = Math.Min(dur, 8); }
+            // v19.2: время на экране — после обрезки; вырезанное не звучит
+            double ed = EdDur; if (ed <= 0.05) return;
+            // v19.7: без выделения — играть от курсора до конца ролика (раньше обрывалось через 8 с)
+            double ea = HasSel ? ToEd(SelA) : ToEd(Head), eb = HasSel ? ToEd(SelB) : ed;
+            if (eb <= ea + 0.05) { ea = 0; eb = ed; }
             string w = Path.Combine(tmpDir, "play.wav");
             try
             {
                 var inv = System.Globalization.CultureInfo.InvariantCulture;
-                var psi = new ProcessStartInfo(ff, "-hide_banner -v error -y -ss " + a.ToString("0.###", inv) + " -to " + b.ToString("0.###", inv) + " -i \"" + file + "\" -vn -ac 2 -ar 44100 \"" + w + "\"") { UseShellExecute = false, CreateNoWindow = true };
+                double sa = ToSrc(ea), sb = ToSrc(eb);
+                var expr = new StringBuilder();
+                foreach (var k in Keep())
+                {
+                    double x0 = Math.Max(k[0], sa), x1 = Math.Min(k[1], sb);
+                    if (x1 <= x0 + 0.005) continue;
+                    if (expr.Length > 0) expr.Append('+');
+                    expr.Append("between(t," + x0.ToString("0.###", inv) + "," + x1.ToString("0.###", inv) + ")");
+                }
+                if (expr.Length == 0) return;
+                try { if (File.Exists(w)) File.Delete(w); } catch { }
+                var psi = new ProcessStartInfo(ff, "-hide_banner -v error -y -i \"" + file + "\" -vn -af \"aselect='" + expr + "',asetpts=N/SR/TB\" -ac 2 -ar 44100 \"" + w + "\"") { UseShellExecute = false, CreateNoWindow = true };
                 using (var p = Process.Start(psi)) p.WaitForExit(20000);
                 player = new System.Media.SoundPlayer(w); player.Load(); player.Play();
-                playFrom = a; playTo = b; Head = a; playing = true; playSw.Restart(); tick.Start();
+                playFrom = ea; playTo = eb; Head = sa; playing = true; playSw.Restart(); tick.Start();
             }
             catch { playing = false; }
         }
@@ -3045,6 +3419,42 @@ namespace XyzRecorder
         }
     }
 
+    // v19.3: окно видео над дорожкой — кадр в точке курсора (во время прослушивания — бегущий)
+    class VideoPanel : Panel
+    {
+        readonly TrimForm ed;
+        public VideoPanel(TrimForm e) { ed = e; DoubleBuffered = true; ResizeRedraw = true; BackColor = Color.Transparent; SetStyle(ControlStyles.Selectable, false); }
+        protected override void OnPaint(PaintEventArgs pe)
+        {
+            var g = pe.Graphics; const int M = 14;
+            var r = new Rectangle(M, 8, Math.Max(10, Width - 2 * M), Math.Max(10, Height - 12));
+            Ui19.Screen(g, new RectangleF(r.X - 3, r.Y - 3, r.Width + 6, r.Height + 6), 10);
+            using (var bk = new SolidBrush(Color.FromArgb(8, 10, 12))) g.FillRectangle(bk, r);
+            var bmp = ed.FrameAt(ed.Head);
+            if (bmp != null)
+            {
+                float k = Math.Min(r.Width / (float)bmp.Width, r.Height / (float)bmp.Height);
+                float w = bmp.Width * k, h = bmp.Height * k;
+                g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                g.DrawImage(bmp, r.X + (r.Width - w) / 2, r.Y + (r.Height - h) / 2, w, h);
+            }
+            string tt = ed.Dur > 0 ? Ui19.Fmt(ed.ToEd(ed.Head)) : "";
+            if (!ed.FramesDone)
+            {
+                double ex = ed.FramesExpected; int c = ed.FramesCount;
+                tt += (tt.Length > 0 ? "   ·   " : "") + "загружаю кадры" + (ex > 1 ? " " + Math.Min(99, (int)(c * 100 / ex)) + "%" : "…");
+            }
+            if (tt.Length > 0)
+            {
+                var f = Theme.Px(Theme.DigitFam, 13f, FontStyle.Regular);
+                var sz = TextRenderer.MeasureText(tt, f);
+                var rb = new Rectangle(r.X + 10, r.Bottom - sz.Height - 14, sz.Width + 14, sz.Height + 6);
+                using (var b = new SolidBrush(Color.FromArgb(170, 0, 0, 0))) g.FillRectangle(b, rb);
+                TextRenderer.DrawText(g, tt, f, new Point(rb.X + 7, rb.Y + 3), Theme.TealHi);
+            }
+        }
+    }
+
     class WavePanel : Panel
     {
         readonly TrimForm ed; bool drag; double dragT0; int edge;   // edge: 0 — новое выделение, 1 — тянем начало, 2 — тянем конец
@@ -3054,8 +3464,33 @@ namespace XyzRecorder
             SetStyle(ControlStyles.Selectable, false);
         }
         const int M = 14, TH = 72;
-        double T(int x) { double w = Math.Max(1, Width - 2 * M); return Math.Max(0, Math.Min(ed.Dur, (x - M) / w * ed.Dur)); }
-        float X(double t) { return (float)(M + (ed.Dur <= 0 ? 0 : t / ed.Dur) * (Width - 2 * M)); }
+        // v19.5: окно просмотра по времени (vOff, vSpan — время после обрезки) и усиление волны
+        double vOff = 0, vSpan = -1; float gain = 1f;
+        double Span { get { double D = ed.EdDur; return vSpan <= 0 || vSpan > D ? D : vSpan; } }
+        double Off { get { double D = ed.EdDur, sp = Span; return Math.Max(0, Math.Min(vOff, D - sp)); } }
+        public void Wheel(int delta, int x, Keys mods)
+        {
+            double D = ed.EdDur; if (D <= 0) return;
+            // v19.6: Ctrl+колесо — растянуть по времени; Ctrl+Shift+колесо — высота волны; колесо — прокрутка
+            if ((mods & Keys.Control) == Keys.Control && (mods & Keys.Shift) == Keys.Shift) { gain = Math.Max(0.5f, Math.Min(30f, gain * (delta > 0 ? 1.25f : 0.8f))); }
+            else if ((mods & Keys.Control) != Keys.Control) { vOff = Off - Math.Sign(delta) * Span * 0.15; vOff = Math.Max(0, Math.Min(vOff, D - Span)); }
+            else
+            {
+                double w = Math.Max(1, Width - 2 * M), sp = Span, off = Off;
+                double at = off + (x - M) / w * sp;
+                double ns = Math.Max(0.5, Math.Min(D, sp * (delta > 0 ? 0.8 : 1.25)));
+                vSpan = ns >= D ? -1 : ns;
+                vOff = Math.Max(0, Math.Min(D - ns, at - (x - M) / w * ns));
+            }
+            Invalidate();
+        }
+        // v19.2: ось — время после обрезки (вырезанное сомкнуто); Cuts/Sel/Head хранятся во времени исходника
+        double T(int x) { double w = Math.Max(1, Width - 2 * M), D = ed.EdDur; return ed.ToSrc(Math.Max(0, Math.Min(D, Off + (x - M) / w * Span))); }
+        float X(double t) { double sp = Span; return (float)(M + (sp <= 0 ? 0 : (ed.ToEd(t) - Off) / sp) * (Width - 2 * M)); }
+        // v19.6: полоса прокрутки под шкалой времени
+        RectangleF ScrollR { get { return new RectangleF(M, Height - 13, Math.Max(10, Width - 2 * M), 9); } }
+        RectangleF ThumbR { get { var r = ScrollR; double D = ed.EdDur; if (D <= 0) return r; return new RectangleF(r.X + (float)(Off / D * r.Width), r.Y, Math.Max(24f, (float)(Span / D * r.Width)), r.Height); } }
+        bool scrollDrag; float scrollGrab; double moveT0, moveA, moveB;
         int EdgeAt(int x)
         {
             if (ed.SelA < 0 || ed.SelB <= ed.SelA) return 0;
@@ -3067,12 +3502,12 @@ namespace XyzRecorder
         double Snap(double t)
         {
             if ((ModifierKeys & Keys.Alt) == Keys.Alt || ed.Dur <= 0) return t;
-            double px = ed.Dur / Math.Max(1, Width - 2 * M);
+            double px = Span / Math.Max(1, Width - 2 * M);
             foreach (var c in ed.Cuts) { if (Math.Abs(t - c[0]) < 6 * px) return c[0]; if (Math.Abs(t - c[1]) < 6 * px) return c[1]; }
             double win = Math.Max(0.12, 10 * px), best = t; float bestV = float.MaxValue, loud = 0.0001f;
             for (double q = t - win; q <= t + win; q += 0.01)
             {
-                if (q < 0 || q > ed.Dur) continue;
+                if (q < 0 || q > ed.Dur || ed.IsCut(q)) continue;
                 float v = ed.PeakAt(q - 0.025, q + 0.025); if (v > loud) loud = v;
                 float w = v + (float)(Math.Abs(q - t) / win) * 0.02f;
                 if (w < bestV) { bestV = w; best = q; }
@@ -3081,27 +3516,55 @@ namespace XyzRecorder
         }
         protected override void OnMouseDown(MouseEventArgs e)
         {
-            if (e.Button != MouseButtons.Left || ed.Dur <= 0) return;
+            if (e.Button != MouseButtons.Left || ed.EdDur <= 0) return;
+            if (e.Y >= ScrollR.Y - 3)
+            {
+                var th = ThumbR; scrollDrag = true;
+                if (th.Contains(e.X, th.Y + 1)) scrollGrab = e.X - th.X;
+                else { scrollGrab = th.Width / 2; ScrollTo(e.X); }
+                return;
+            }
             drag = true; edge = EdgeAt(e.X);
+            if (edge == 0 && ed.SelA >= 0 && ed.SelB > ed.SelA && e.X > X(ed.SelA) + 6 && e.X < X(ed.SelB) - 6)
+            { edge = 3; moveT0 = ed.ToEd(T(e.X)); moveA = ed.ToEd(ed.SelA); moveB = ed.ToEd(ed.SelB); Cursor = Cursors.SizeAll; return; }   // v19.6: тянуть выделение целиком
             if (edge == 0) { dragT0 = Snap(T(e.X)); ed.Head = dragT0; ed.SelA = ed.SelB = -1; }
             Invalidate(); ed.UpdInfo();
         }
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            if (!drag) { Cursor = EdgeAt(e.X) != 0 ? Cursors.SizeWE : Cursors.IBeam; return; }
+            if (scrollDrag) { ScrollTo(e.X - scrollGrab + ThumbR.Width / 2); return; }
+            if (!drag)
+            {
+                if (e.Y >= ScrollR.Y - 3) { Cursor = Cursors.Hand; return; }
+                bool inSel = ed.SelA >= 0 && ed.SelB > ed.SelA && e.X > X(ed.SelA) + 6 && e.X < X(ed.SelB) - 6;
+                Cursor = EdgeAt(e.X) != 0 ? Cursors.SizeWE : inSel ? Cursors.SizeAll : Cursors.IBeam; return;
+            }
             double t = Snap(T(e.X));
+            if (edge == 3)
+            {
+                double D = ed.EdDur, len = moveB - moveA, na = Math.Max(0, Math.Min(D - len, moveA + ed.ToEd(T(e.X)) - moveT0));
+                ed.SelA = ed.ToSrc(na); ed.SelB = ed.ToSrc(na + len); ed.Head = ed.SelA; Invalidate(); ed.UpdInfo(); return;
+            }
             if (edge == 1) { ed.SelA = Math.Min(t, ed.SelB - 0.05); }
             else if (edge == 2) { ed.SelB = Math.Max(t, ed.SelA + 0.05); }
             else { ed.SelA = Math.Min(dragT0, t); ed.SelB = Math.Max(dragT0, t); }
+            ed.Head = t;   // v19.3: кадр в окне видео идёт за мышью
             Invalidate(); ed.UpdInfo();
         }
-        protected override void OnMouseUp(MouseEventArgs e) { drag = false; }
+        protected override void OnMouseUp(MouseEventArgs e) { drag = false; scrollDrag = false; }
+        void ScrollTo(float cx)
+        {
+            var r = ScrollR; double D = ed.EdDur; if (D <= 0 || vSpan <= 0) return;
+            double c = (cx - r.X) / r.Width * D;
+            vOff = Math.Max(0, Math.Min(D - Span, c - Span / 2)); Invalidate();
+        }
+        protected override void OnInvalidated(InvalidateEventArgs e) { base.OnInvalidated(e); ed.VideoInvalidate(); }
         protected override void OnPaint(PaintEventArgs pe)
         {
             var g = pe.Graphics; g.SmoothingMode = SmoothingMode.None;
             int w = Width - 2 * M; if (w < 10) return;
             // v19: без полосы кадров (замечание db 01:10 — это копия экрана, места занимает много, пользы мало)
-            var rWv = new Rectangle(M, 10, w, Math.Max(40, Height - 40));
+            var rWv = new Rectangle(M, 10, w, Math.Max(40, Height - 54));
             var rTh = new Rectangle(M, rWv.Y, w, 0);
             Ui19.Screen(g, new RectangleF(rWv.X - 3, rWv.Y - 3, rWv.Width + 6, rWv.Height + 6), 10);
             g.SmoothingMode = SmoothingMode.None;
@@ -3109,36 +3572,60 @@ namespace XyzRecorder
             if (ed.Dur <= 0) { TextRenderer.DrawText(g, "Загружаю дорожку…", Font, rWv, Theme.Mute); return; }
             var digF = Theme.Px(Theme.DigitFam, 12f, FontStyle.Regular);
             int mid = rWv.Y + rWv.Height / 2;
-            using (var pk = new Pen(Theme.Teal)) using (var pc = new Pen(Theme.A(Theme.Mute, 0.5f)))
+            double D = ed.EdDur, sp0 = Span, of0 = Off;
+            float norm = gain / Math.Max(0.02f, ed.MaxPeak) * 0.9f;
+            g.SetClip(rWv);
+            using (var pk = new Pen(Theme.Teal))
                 for (int x = 0; x < w; x++)
                 {
-                    double t0 = x / (double)w * ed.Dur, t1 = (x + 1) / (double)w * ed.Dur;
-                    float a = ed.PeakAt(t0, t1); int h = (int)(a * (rWv.Height / 2 - 4));
-                    g.DrawLine(ed.IsCut(t0) ? pc : pk, M + x, mid - h, M + x, mid + h);
+                    double e0 = of0 + x / (double)w * sp0, e1 = of0 + (x + 1) / (double)w * sp0, s0 = ed.ToSrc(e0);
+                    float a = Math.Min(1f, ed.PeakAt(s0, s0 + (e1 - e0)) * norm); int h = (int)(a * (rWv.Height / 2 - 4));
+                    g.DrawLine(pk, M + x, mid - h, M + x, mid + h);
                 }
-            using (var b = new HatchBrush(HatchStyle.WideUpwardDiagonal, Theme.A(Theme.Red, 0.55f), Theme.A(Color.Black, 0.55f)))
-                foreach (var c in ed.Cuts) { float x0 = X(c[0]), x1 = X(c[1]); g.FillRectangle(b, x0, rTh.Y, x1 - x0, rWv.Bottom - rTh.Y); }
+            // стыки на месте вырезанного: красная черта с треугольниками
+            using (var pr = new Pen(Theme.Red, 2f)) using (var br = new SolidBrush(Theme.Red))
+                foreach (var c in ed.Cuts)
+                {
+                    float xs = X(c[0]);
+                    g.DrawLine(pr, xs, rWv.Y, xs, rWv.Bottom);
+                    g.FillPolygon(br, new[] { new PointF(xs - 5, rWv.Y), new PointF(xs + 5, rWv.Y), new PointF(xs, rWv.Y + 7) });
+                    g.FillPolygon(br, new[] { new PointF(xs - 5, rWv.Bottom), new PointF(xs + 5, rWv.Bottom), new PointF(xs, rWv.Bottom - 7) });
+                }
             if (ed.SelA >= 0 && ed.SelB > ed.SelA)
             {
                 float x0 = X(ed.SelA), x1 = X(ed.SelB);
                 using (var b = new SolidBrush(Theme.A(Theme.TealHi, 0.22f))) g.FillRectangle(b, x0, rTh.Y, x1 - x0, rWv.Bottom - rTh.Y);
                 using (var p = new Pen(Theme.TealHi)) { g.DrawLine(p, x0, rTh.Y, x0, rWv.Bottom); g.DrawLine(p, x1, rTh.Y, x1, rWv.Bottom); }
             }
+            g.ResetClip();
             Ui19.Gloss(g, rWv, 10);
+            {   // полоса прокрутки: вся длина ролика, светлая часть — видимый кусок
+                var sr = ScrollR; var th = ThumbR;
+                using (var b = new SolidBrush(Theme.A(Theme.Mute, 0.18f))) g.FillRectangle(b, sr);
+                using (var b = new SolidBrush(Theme.A(Theme.Teal, vSpan > 0 ? 0.75f : 0.3f))) g.FillRectangle(b, th);
+                using (var pr = new Pen(Theme.Red, 1f)) foreach (var c in ed.Cuts) { float xs = sr.X + (float)(ed.ToEd(c[0]) / Math.Max(1e-6, D) * sr.Width); g.DrawLine(pr, xs, sr.Y, xs, sr.Bottom); }
+            }
+            if (vSpan > 0 || Math.Abs(gain - 1f) > 0.01f)
+            {
+                string zt = (vSpan > 0 ? "×" + (D / Span).ToString("0.#") + " по времени" : "") + (Math.Abs(gain - 1f) > 0.01f ? (vSpan > 0 ? "  ·  " : "") + "волна ×" + gain.ToString("0.#") : "");
+                TextRenderer.DrawText(g, zt, Theme.Px(Theme.UiFam, 11f, FontStyle.Regular), new Point(rWv.Right - 220, rWv.Y + 6), Theme.A(Theme.Teal, 0.8f));
+
+            }
             using (var p = new Pen(Theme.Amber, 1.5f)) { float hx = X(ed.Head); g.DrawLine(p, hx, rTh.Y - 4, hx, rWv.Bottom + 4); }
             // шкала времени
-            double step = ed.Dur <= 20 ? 1 : ed.Dur <= 60 ? 5 : ed.Dur <= 300 ? 15 : 60;
-            for (double t = 0; t <= ed.Dur + 0.001; t += step)
+            double SP = Span, OF = Off;
+            double step = SP <= 3 ? 0.25 : SP <= 8 ? 0.5 : SP <= 20 ? 1 : SP <= 60 ? 5 : SP <= 300 ? 15 : 60;
+            for (double t = Math.Ceiling(OF / step) * step; t <= OF + SP + 0.001; t += step)
             {
-                float x = X(t); using (var p = new Pen(Theme.A(Theme.Mute, 0.5f))) g.DrawLine(p, x, rWv.Bottom, x, rWv.Bottom + 5);
-                TextRenderer.DrawText(g, Ui19.Fmt(t).Substring(0, 5), digF, new Point((int)x + 2, rWv.Bottom + 4), Theme.A(Theme.Teal, 0.7f));
+                float x = (float)(M + (SP <= 0 ? 0 : (t - OF) / SP) * w); using (var p = new Pen(Theme.A(Theme.Mute, 0.5f))) g.DrawLine(p, x, rWv.Bottom, x, rWv.Bottom + 5);
+                TextRenderer.DrawText(g, step < 1 ? Ui19.Fmt(t) : Ui19.Fmt(t).Substring(0, 5), digF, new Point((int)x + 2, rWv.Bottom + 4), Theme.A(Theme.Teal, 0.7f));
             }
         }
     }
 
     class AboutForm : Form
     {
-        public const string Version = "v19";
+        public const string Version = "v19.9";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -3801,8 +4288,30 @@ namespace XyzRecorder
             var rw = new ToolStripMenuItem("Открыть исходники"); rw.ToolTipText = "Записи до «Улучшить голос» (хранятся 7 дней).";
             rw.Click += (o, e) => { try { Directory.CreateDirectory(Engine.RawDir); Process.Start("explorer.exe", "\"" + Engine.RawDir + "\""); } catch { } };
             var ab = new ToolStripMenuItem("О программе…"); ab.Click += (o, e) => BeginInvoke(new Action(ShowAbout));
-            m.Items.AddRange(new ToolStripItem[] { cm, new ToolStripSeparator(), f1, f2, rw, new ToolStripSeparator(), VoiceItem(), new ToolStripSeparator(), r1, r2, aft, new ToolStripSeparator(), sk1, pal, c1, c2, new ToolStripSeparator(), t1, ab, x1 });
+            // v19.4: обрезать любой записанный ролик
+            var tr = new ToolStripMenuItem("Обрезать ролик…"); tr.ToolTipText = "Открыть уже записанное видео в редакторе «Обрезать».";
+            tr.Click += (o, e) => BeginInvoke(new Action(TrimPick));
+            var shx = new ToolStripMenuItem("«Обрезать» в меню Проводника") { Checked = TrimFiles.ShellOn() };
+            shx.ToolTipText = "Правой кнопкой по видео (mp4, mkv, mov, avi) → «Обрезать в XYZ Запись».\nВ Windows 11 — в «Показать дополнительные параметры».";
+            shx.Click += (o, e) => { bool on = !TrimFiles.ShellOn(); string err = TrimFiles.SetShell(on); if (err != null) MessageBox.Show(err, "XYZ Запись"); };
+            var hl = new ToolStripMenuItem("Подсвечивать курсор в записи") { Checked = cfg.Get("halo", "1") == "1" };   // v19.8
+            hl.ToolTipText = "Жёлтый полупрозрачный круг вокруг курсора — только в ролике.";
+            hl.Click += (o, e) => { bool on = cfg.Get("halo", "1") != "1"; cfg.Set("halo", on ? "1" : "0"); cfg.Save(); };
+            var kk = new ToolStripMenuItem("Показывать нажатия в записи") { Checked = cfg.Get("keys", "1") == "1" };   // v19.8
+            kk.ToolTipText = "Сочетания клавиш (Ctrl+Z, Esc, Tab…) — табличкой слева внизу ролика, щелчки мыши — кружками.\nОбычный набор текста не записывается. На экране во время записи ничего не видно.";
+            kk.Click += (o, e) => { bool on = cfg.Get("keys", "1") != "1"; cfg.Set("keys", on ? "1" : "0"); cfg.Save(); };
+            m.Items.AddRange(new ToolStripItem[] { cm, new ToolStripSeparator(), f1, f2, rw, tr, shx, new ToolStripSeparator(), VoiceItem(), new ToolStripSeparator(), r1, r2, kk, hl, aft, new ToolStripSeparator(), sk1, pal, c1, c2, new ToolStripSeparator(), t1, ab, x1 });
             return m;
+        }
+
+        void TrimPick()
+        {
+            using (var d = new OpenFileDialog { Title = "Обрезать ролик — XYZ Запись", Filter = "Видео (*.mp4;*.mkv;*.mov;*.avi;*.webm)|*.mp4;*.mkv;*.mov;*.avi;*.webm|Все файлы|*.*" })
+            {
+                try { if (Directory.Exists(Folder)) d.InitialDirectory = Folder; } catch { }
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                TrimFiles.Launch(d.FileName);   // v19.5: отдельное окно, запись можно вести параллельно
+            }
         }
 
         void ShowAbout()
@@ -4163,6 +4672,9 @@ namespace XyzRecorder
             if (exclFail) SetStatus("Windows не дала скрыть прибор из записи — он попадёт в ролик.", true);
             else SetStatus(micWarn ?? "", micWarn != null);
             sw.Start(); state = St.Rec;
+            KeyLog.Keys = cfg.Get("keys", "1") == "1"; KeyLog.Halo = cfg.Get("halo", "1") == "1";
+            keysRec = KeyLog.Keys || KeyLog.Halo;   // v19.8: показ нажатий и подсветка курсора
+            if (keysRec) { try { KeyLog.Start(); } catch { keysRec = false; } }
             UpdateButtons(); UpdateTime();
             StartMeter(false);
             ShowRegionFrame();   // v11
@@ -4173,6 +4685,7 @@ namespace XyzRecorder
             if (state == St.Rec)
             {
                 sw.Stop(); acc += sw.Elapsed; sw.Reset();
+                if (keysRec) KeyLog.Pause();
                 state = St.Paused; UpdateButtons(); UpdateTime();
                 eng.StopSegment();
             }
@@ -4180,13 +4693,16 @@ namespace XyzRecorder
             {
                 if (!eng.StartSegment()) { SetStatus("Не удалось продолжить: " + eng.LastError, true); return; }
                 sw.Start(); state = St.Rec; UpdateButtons();
+                if (keysRec) KeyLog.Resume();
             }
             if (rframe != null && rframe.Visible) rframe.SetColor(state == St.Paused);   // v11
         }
 
+        bool keysRec;
         void StopRec()
         {
             if (state != St.Rec && state != St.Paused) return;
+            try { KeyLog.Stop(); } catch { }
             if (state == St.Rec) { sw.Stop(); acc += sw.Elapsed; sw.Reset(); eng.StopSegment(); }
             ApplyExclude(false);   // v7: запись остановлена — прибор снова виден скриншотам
             HideRegionFrame();     // v11
@@ -4205,6 +4721,14 @@ namespace XyzRecorder
             {
                 bool ok = eng.Finalize(of);
                 if (ok) eng.CleanupSegments();
+                if (ok && keysRec && (KeyLog.Events.Count > 0 || KeyLog.Moves.Count > 0))   // v19.8: нажатия и курсор поверх видео
+                {
+                    try { BeginInvoke(new Action(() => SetStatus("Добавляю нажатия клавиш…", false))); } catch { }
+                    string kt = Path.Combine(eng.WorkDir, "keys_" + Path.GetFileName(of)); string kerr;
+                    if (KeyLog.Burn(ffmpeg, of, kt, eng.CapRect, eng.WorkDir, eng.Log, out kerr))
+                    { try { File.Delete(of); File.Move(kt, of); } catch (Exception kx) { eng.Log("нажатия: не заменил файл: " + kx.Message); } }
+                    else eng.Log("нажатия: не наложены: " + kerr);
+                }
                 int voice = 0;   // 0 — не обрабатывали, 1 — звук улучшен, −1 — ошибка (оставлен исходный)
                 if (ok && doVoice)
                 {
@@ -4443,9 +4967,25 @@ namespace XyzRecorder
                 if (k == "--snapshot-about") return Snapshot11("about");
                 if (k == "--snapshot-palettes") return SnapshotPalettes();   // v19
                 if (k == "--snapshot-toast") return SnapshotToast(i + 1 < args.Length ? args[i + 1] : "test.mp4");   // v19
+                if (k == "--keystest") return KeyLog.SelfTest(i + 1 < args.Length ? args[i + 1] : "test.mp4");   // v19.8
                 if (k == "--snapshot-region") return Snapshot11("region");
                 if (k == "--regiontest") return RegionTest(i + 1 < args.Length ? args[i + 1] : "100,100,640,360");
                 if (k == "--capturetest") return CaptureTest(i + 1 < args.Length ? args[i + 1].Trim().ToLower() : "full", i + 2 < args.Length ? args[i + 2] : null);   // v13
+            }
+            // v19.4: обрезать уже записанный ролик — «XYZ Запись.exe --trim файл» или просто путь к видео (меню Проводника, перетаскивание на exe)
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a0 = args[i].Trim(), f0 = null;
+                if (a0.ToLower() == "--trim") { if (i + 1 < args.Length) f0 = args[i + 1]; }
+                else if (TrimFiles.IsVideo(a0) && File.Exists(a0)) f0 = a0;
+                if (f0 != null)
+                {
+                    try { Theme.ApplyPal(Settings.Load().Get("palette", "mint")); } catch { }
+                    if (!File.Exists(f0)) { MessageBox.Show("Файл не найден:\n" + f0, "XYZ Запись"); return 1; }
+                    if (Engine.FindFfmpeg() == null) { MessageBox.Show("Не найден ffmpeg — положите папку ffmpeg рядом с программой.", "XYZ Запись"); return 1; }
+                    Application.Run(new TrimForm(f0));
+                    return 0;
+                }
             }
             try { var ct = new Thread(() => Engine.CleanRaw(7)); ct.IsBackground = true; ct.Start(); } catch { }   // v11
             bool created;
@@ -4459,6 +4999,7 @@ namespace XyzRecorder
                     return 0;
                 }
                 Application.ThreadException += (s, e) => MessageBox.Show(e.Exception.ToString(), "XYZ Запись — ошибка");
+                try { if (TrimFiles.ShellOn()) TrimFiles.SetShell(true); } catch { }   // v19.5: обновить пункт Проводника (путь exe, «Открыть с помощью»)
                 Application.Run(new MainForm());
             }
             return 0;
@@ -4486,7 +5027,7 @@ namespace XyzRecorder
                             var tfm = frm as TrimForm;
                             if (tfm != null)
                             {
-                                for (int w8 = 0; w8 < 100 && (!tfm.Ready); w8++) { Thread.Sleep(100); Application.DoEvents(); }
+                                for (int w8 = 0; w8 < 300 && (!tfm.Ready || !tfm.FramesDone); w8++) { Thread.Sleep(100); Application.DoEvents(); }
                                 double D = tfm.Dur; tfm.Cuts.Add(new[] { D * 0.05, D * 0.15 }); tfm.SelA = D * 0.55; tfm.SelB = D * 0.7; tfm.Head = D * 0.55; tfm.UpdInfo();
                                 frm.Refresh(); Application.DoEvents();
                             }
