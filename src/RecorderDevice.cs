@@ -810,8 +810,13 @@ namespace XyzRecorder
                 }
                 Application.DoEvents();
             }
-            AppLog.W("сегмент " + Segments.Count + ": " + mode + " (строки Press [q] не было за 8 с, процесс жив)");
-            return true; // не дождались строки, но процесс жив — считаем, что пишет
+            // v19.10: ffmpeg жив, но кадров нет (бывает у ddagrab при удалённом рабочем столе) — раньше считали, что пишет,
+            // и после «Стоп» было «Нет записанных фрагментов». Теперь снимаем процесс и отдаём false: дальше — запасной gdigrab.
+            AppLog.W("сегмент " + Segments.Count + ": " + mode + " — строки Press [q] не было за 8 с, снимаю ffmpeg: " + Short(Tail(400)));
+            try { if (!p.HasExited) p.Kill(); p.WaitForExit(3000); } catch { }
+            lock (lk) LastError = "ffmpeg не начал запись за 8 с (" + mode + ")";
+            proc = null;
+            return false;
         }
 
         string Tail(int n) { string t = tail.ToString(); return t.Length > n ? t.Substring(t.Length - n) : t; }
@@ -3625,7 +3630,7 @@ namespace XyzRecorder
 
     class AboutForm : Form
     {
-        public const string Version = "v19.9";
+        public const string Version = "v19.10";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
