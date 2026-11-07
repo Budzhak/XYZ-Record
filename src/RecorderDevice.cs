@@ -1,4 +1,5 @@
-﻿// XYZ Запись v19 (05.11.2026): облики-палитры «как в Winamp» — меню «Цвет облика ▸»: Мятный, Нуар, Чёрно-красный,
+﻿// XYZ Запись v19.11 (07.11.2026): новогодний облик «Новогодний» — шапка Деда Мороза с помпоном на эмблеме (res/hat@1x|2x.png).
+// XYZ Запись v19 (05.11.2026): облики-палитры «как в Winamp» — меню «Цвет облика ▸»: Мятный, Нуар, Чёрно-красный,
 // Чёрно-бело-красный, Зелёно-красный. Эмблема не меняется; перекрашиваются корпус (ColorMatrix), подсветка и меню. ini: palette=<id>.
 // XYZ Запись v18 (01.11.2026): новый значок приложения — виниловая пластинка (xyz_rec_vinyl.ico: /win32icon и ресурс app.ico — окно, трей). Код как в v17.
 // XYZ Запись v17 (01.11.2026): компакт в облике «Рамка» — без плашки и обводки: на прозрачном фоне только эмблема (каска, «db»),
@@ -261,6 +262,7 @@ namespace XyzRecorder
             new Pal { Id = "blackred", Name = "Чёрно-красный",   Acc = Color.FromArgb(232, 58, 50),   AccHi = Color.FromArgb(255, 160, 150), Rec = Color.FromArgb(255, 40, 34), Pause = Color.FromArgb(255, 150, 60), Sat = 0f, Br = 0.55f, Ta = 0.18f, Tint = Color.FromArgb(150, 40, 36) },
             new Pal { Id = "bwred", Name = "Чёрно-бело-красный", Acc = Color.FromArgb(236, 238, 242), AccHi = Color.FromArgb(255, 255, 255), Rec = Color.FromArgb(240, 36, 36), Pause = Color.FromArgb(240, 36, 36), Sat = 0f, Br = 0.7f },
             new Pal { Id = "greenred", Name = "Зелёно-красный",  Acc = Color.FromArgb(118, 214, 92),  AccHi = Color.FromArgb(205, 255, 185), Rec = Color.FromArgb(255, 64, 52), Pause = Color.FromArgb(255, 176, 56), Sat = 0.25f, Br = 0.78f, Ta = 0.3f, Tint = Color.FromArgb(70, 120, 60) },
+            new Pal { Id = "newyear", Name = "Новогодний (шапка Деда Мороза)", Acc = Color.FromArgb(214, 236, 248), AccHi = Color.FromArgb(255, 255, 255), Rec = Color.FromArgb(232, 40, 44), Pause = Color.FromArgb(255, 196, 72), Sat = 0.55f, Br = 0.9f, Ta = 0.12f, Tint = Color.FromArgb(170, 196, 230) },
         };
         public static Pal Cur = Pals[0];
         public static void ApplyPal(string id)
@@ -352,6 +354,11 @@ namespace XyzRecorder
                 if (cache.TryGetValue(pk, out pb)) return pb;
                 var orig = GetRaw(name, s);
                 pb = orig == null ? null : Recolor(orig, Theme.Cur.Acc);
+                if (pb != null && Theme.Cur.Id == "newyear")
+                {   // v19.11: новогодний облик — красная шапка Деда Мороза с помпоном поверх каски
+                    var hat = GetRaw("hat", s);
+                    if (hat != null) using (var g = Graphics.FromImage(pb)) { g.CompositingMode = CompositingMode.SourceOver; g.DrawImage(hat, new Rectangle(0, 0, pb.Width, pb.Height), 0, 0, hat.Width, hat.Height, GraphicsUnit.Pixel); }
+                }
                 cache[pk] = pb; return pb;
             }
             return GetRaw(name, s);
@@ -3630,7 +3637,7 @@ namespace XyzRecorder
 
     class AboutForm : Form
     {
-        public const string Version = "v19.10";
+        public const string Version = "v19.11";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
