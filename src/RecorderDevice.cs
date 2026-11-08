@@ -1,4 +1,4 @@
-﻿// XYZ Запись v19.14 (09.11.2026): ddagrab — метка кадра по часам в момент захвата (setpts=RTCTIME внутри lavfi вместо
+﻿// XYZ Запись v19.15 (09.11.2026): сдвиг первого кадра до 20 с принимается (у db ffmpeg стартовал 4 с — события уезжали на 4 с). v19.14 (09.11.2026): ddagrab — метка кадра по часам в момент захвата (setpts=RTCTIME внутри lavfi вместо
 // -use_wallclock_as_timestamps), строка привязки нажатий/курсора (источник, ключи входа, сдвиг X, «секундомер−файл» Y) — в recorder.log;
 // запасная поправка для ddagrab — ini mk_dda_shift (с, + = подсветку позже; по умолчанию 0).
 // XYZ Запись v19.13 (09.11.2026): подсветка курсора и щелчки без отставания на 5 кадров (сдвиг по часам первого кадра). v19.12 (08.11.2026): показ мыши и клавиш как у Bandicam — подсветка курсора мягким градиентом без отставания
@@ -3214,7 +3214,7 @@ namespace XyzRecorder
                 vs[i] = acc; acc += haveDur ? sd[i] : sc[i][1] - sc[i][0];
                 double o = double.NaN;
                 if (fs != null && fs.Count == n && sw.Count == n && !double.IsNaN(fs[i])) o = sw[i] - fs[i];
-                if (double.IsNaN(o) || o < -0.5 || o > 3) { sb.Append(double.IsNaN(o) ? " ?" : string.Format(inv, " {0:0.000}(отброшен)", o)); o = 0; }
+                if (double.IsNaN(o) || o < -0.5 || o > 20) { sb.Append(double.IsNaN(o) ? " ?" : string.Format(inv, " {0:0.000}(отброшен)", o)); o = 0; }
                 else sb.AppendFormat(inv, " {0:0.000}", o);
                 string m = src != null && src.Count == n ? src[i] : "?";
                 if (m == "ddagrab" && DdaShift != 0) { o += DdaShift; sb.AppendFormat(inv, " +mk_dda_shift {0:0.000}", DdaShift); }   // v19.14: запасная поправка
@@ -4098,7 +4098,7 @@ namespace XyzRecorder
 
     class AboutForm : Form
     {
-        public const string Version = "v19.14";
+        public const string Version = "v19.15";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
