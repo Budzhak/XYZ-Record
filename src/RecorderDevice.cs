@@ -1,4 +1,6 @@
-﻿// XYZ Запись v19.16 (09.11.2026): окно «Обрезать» растягивается за края и углы, кнопка «развернуть/восстановить» и двойной щелчок
+﻿// XYZ Запись v19.17 (09.11.2026): звук не теряет последние ~1,7 с — после «Стоп»/«Пауза» ffmpeg пишет ещё rec_tail_ms (ini, 1800 мс),
+// затем «q»; при склейке каждый сегмент обрезается по моменту нажатия (часы первого кадра → стоп), видео без B-кадров (-bf 0) для точной обрезки.
+// XYZ Запись v19.16 (09.11.2026): окно «Обрезать» растягивается за края и углы, кнопка «развернуть/восстановить» и двойной щелчок
 // по заголовку, видео и дорожка подстраиваются под размер; размер, положение и развёрнутость — в ini (trim_bounds, trim_max).
 // XYZ Запись v19.15 (09.11.2026): сдвиг первого кадра до 20 с принимается (у db ffmpeg стартовал 4 с — события уезжали на 4 с). v19.14 (09.11.2026): ddagrab — метка кадра по часам в момент захвата (setpts=RTCTIME внутри lavfi вместо
 // -use_wallclock_as_timestamps), строка привязки нажатий/курсора (источник, ключи входа, сдвиг X, «секундомер−файл» Y) — в recorder.log;
@@ -519,6 +521,9 @@ namespace XyzRecorder
         public List<double> SegStarts = new List<double>();
         public List<string> SegModes = new List<string>();   // v19.14: чем писался каждый сегмент (ddagrab / gdigrab) и ключи входа — для recorder.log
         public List<string> SegInputs = new List<string>();
+        // v19.17: длина сегмента до момента нажатия «Стоп»/«Пауза» (с от первого кадра; NaN — не обрезать)
+        public List<double> SegCut = new List<double>();
+        static double UnixNow() { return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds; }
         double curStart = double.NaN; string curInput = "";
         static readonly System.Text.RegularExpressions.Regex StartRx = new System.Text.RegularExpressions.Regex(@"^\s*Duration:.*?,\s*start:\s*(-?\d+\.\d+)");
         public string LastError = "";
@@ -812,7 +817,7 @@ namespace XyzRecorder
             if (mic) a.Append("-thread_queue_size 1024 -f dshow -audio_buffer_size 50 -i audio=\"" + Mic + "\" ");
             a.Append("-map 0:v ");
             if (mic) a.Append("-map 1:a ");
-            a.Append("-vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -c:v libx264 -preset veryfast -crf 28 -pix_fmt yuv420p ");
+            a.Append("-vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -c:v libx264 -preset veryfast -crf 28 -bf 0 -pix_fmt yuv420p ");   // v19.17: без B-кадров — конец сегмента режется по кадру без порчи
             if (mic) a.Append("-af aresample=async=1 -c:a aac -b:a 96k ");
             a.Append("\"" + curSeg + "\"");
             Log("=== " + DateTime.Now.ToString("HH:mm:ss") + " ffmpeg " + a);
@@ -865,9 +870,15 @@ namespace XyzRecorder
             Log(e.Data);
         }
 
-        public bool StopSegment()
+        public bool StopSegment() { return StopSegment(0); }
+        // v19.17: tailMs > 0 — момент нажатия запоминаем, а «q» шлём через tailMs: звук с микрофона приходит в ffmpeg с запаздыванием,
+        // и раньше последние ~1,7 с звука в файл не попадали. Лишний хвост видео потом отрезается при склейке (SegCut).
+        public bool StopSegment(int tailMs)
         {
             var p = proc; if (p == null) return true;
+            double stopWall = UnixNow();
+            if (tailMs > 0) { var tw = Stopwatch.StartNew(); while (tw.ElapsedMilliseconds < tailMs && !p.HasExited) Thread.Sleep(20); }
+            double qWall = UnixNow();
             try { p.StandardInput.Write("q"); p.StandardInput.Flush(); } catch { }
             if (!p.WaitForExit(20000)) { Log("ffmpeg не ответил на q — принудительно"); try { p.Kill(); } catch { } }
             p.WaitForExit();
@@ -877,23 +888,44 @@ namespace XyzRecorder
             {
                 Segments.Add(curSeg); double st; string inp; lock (lk) { st = curStart; inp = curInput; }
                 SegStarts.Add(st > 1e9 ? st : double.NaN); SegModes.Add(CapMode); SegInputs.Add(inp);
+                double cut = double.NaN; string how = "без обрезки";
+                if (tailMs > 0)
+                {
+                    var inv = System.Globalization.CultureInfo.InvariantCulture;
+                    double fd = TrimForm.Duration(curSeg);
+                    if (st > 1e9 && stopWall - st > 0.2) { cut = stopWall - st; how = "по часам первого кадра"; }
+                    else if (fd > 0) { cut = fd - (qWall - stopWall); how = "запасной расчёт: длина файла − хвост"; }   // время первого кадра не узнали
+                    if (!(cut > 0.2)) { cut = double.NaN; how = "без обрезки (не посчитать)"; }
+                    AppLog.W(string.Format(inv, "хвост: сегмент {0}, стоп по часам {1:0.000}, q через {2:0} мс, обрезка сегмента до {3} с ({4}), файл {5:0.000} с",
+                        Segments.Count - 1, stopWall, (qWall - stopWall) * 1000, double.IsNaN(cut) ? "—" : cut.ToString("0.000", inv), how, fd));
+                }
+                SegCut.Add(cut);
                 AppLog.W("сегмент " + (Segments.Count - 1) + ": " + CapMode + ", первый кадр (start) " + (st > 1e9 ? st.ToString("0.000000", System.Globalization.CultureInfo.InvariantCulture) : "не найден (" + st.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")") + ", вход: " + inp);   // v19.14
             }
             else lock (lk) LastError = "Сегмент не записан:\n" + Tail(1500);
             return ok;
         }
+        double CutOf(int i) { return i < SegCut.Count ? SegCut[i] : double.NaN; }
+        // v19.17: длина сегмента в итоговом ролике (обрезанная), для привязки нажатий/курсора
+        public double SegLen(int i) { double d = TrimForm.Duration(Segments[i]), c = CutOf(i); return !double.IsNaN(c) && (d <= 0 || c < d) ? c : d; }
 
         public bool Finalize(string outFile)
         {
             if (Segments.Count == 0) { LastError = "Нет записанных фрагментов."; return false; }
             string args;
-            if (Segments.Count == 1)
-                args = "-hide_banner -y -i \"" + Segments[0] + "\" -map 0 -c copy -movflags +faststart \"" + outFile + "\"";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (Segments.Count == 1)   // v19.17: -t — обрезка по моменту нажатия «Стоп» (сегмент без B-кадров, копирование режет по кадру)
+                args = "-hide_banner -y -i \"" + Segments[0] + "\" -map 0 -c copy " + (double.IsNaN(CutOf(0)) ? "" : "-t " + CutOf(0).ToString("0.000", inv) + " ") + "-movflags +faststart \"" + outFile + "\"";
             else
             {
                 string list = Path.Combine(WorkDir, "list.txt");
                 var sb = new StringBuilder();
-                foreach (var s in Segments) sb.Append("file '").Append(s.Replace('\\', '/').Replace("'", "'\\''")).Append("'\n");
+                for (int i = 0; i < Segments.Count; i++)
+                {
+                    var s = Segments[i];
+                    sb.Append("file '").Append(s.Replace('\\', '/').Replace("'", "'\\''")).Append("'\n");
+                    if (!double.IsNaN(CutOf(i))) sb.Append("outpoint ").Append(CutOf(i).ToString("0.000", inv)).Append("\n");   // v19.17
+                }
                 File.WriteAllText(list, sb.ToString(), new UTF8Encoding(false));
                 args = "-hide_banner -y -f concat -safe 0 -i \"" + list + "\" -map 0 -c copy -movflags +faststart \"" + outFile + "\"";
             }
@@ -904,6 +936,7 @@ namespace XyzRecorder
             return ok;
         }
 
+        public void ClearSegments() { Segments.Clear(); SegStarts.Clear(); SegModes.Clear(); SegInputs.Clear(); SegCut.Clear(); }
         public void CleanupSegments()
         {
             foreach (var s in Segments) { try { File.Delete(s); } catch { } }
@@ -4192,7 +4225,7 @@ namespace XyzRecorder
 
     class AboutForm : Form
     {
-        public const string Version = "v19.16";
+        public const string Version = "v19.17";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -5204,7 +5237,7 @@ namespace XyzRecorder
             eng.MicName = m != null ? m.Name : null;
             if (testing) return;
             KeyLog.LoadCfg(cfg); Engine.DrawMouse = KeyLog.Cursor;   // v19.12
-            eng.Segments.Clear(); eng.SegStarts.Clear(); eng.SegModes.Clear(); eng.SegInputs.Clear();
+            eng.ClearSegments();
             eng.WorkDir = Path.Combine(Path.GetTempPath(), "xyz_rec", DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             Directory.CreateDirectory(eng.WorkDir);
             acc = TimeSpan.Zero; sw.Reset();
@@ -5265,10 +5298,13 @@ namespace XyzRecorder
                 sw.Stop(); acc += sw.Elapsed; sw.Reset();
                 if (keysRec) KeyLog.Pause();
                 state = St.Paused; UpdateButtons(); UpdateTime();
-                eng.StopSegment();
+                int tl = TailMs();   // v19.17: «q» через rec_tail_ms в фоне, окно не замирает
+                stopTh = new Thread(() => { try { eng.StopSegment(tl); } catch (Exception ex) { AppLog.W("пауза: " + ex.Message); } }); stopTh.IsBackground = true; stopTh.Start();
             }
             else if (state == St.Paused)
             {
+                if (waitingStop) return;
+                WaitStop();
                 if (!eng.StartSegment()) { SetStatus("Не удалось продолжить: " + eng.LastError, true); return; }
                 sw.Start(); state = St.Rec; UpdateButtons();
                 if (keysRec) KeyLog.Resume();
@@ -5277,11 +5313,26 @@ namespace XyzRecorder
         }
 
         bool keysRec;
+        // v19.17: хвост записи после «Стоп»/«Пауза» (ini rec_tail_ms, 0 — как раньше), остановка сегмента в фоне
+        Thread stopTh; bool waitingStop;
+        int TailMs()
+        {
+            string v0 = cfg.Get("rec_tail_ms", ""); if (v0 == "") cfg.Set("rec_tail_ms", "1800");
+            int v; if (!int.TryParse(cfg.Get("rec_tail_ms", "1800"), out v)) v = 1800; return Math.Max(0, Math.Min(5000, v));
+        }
+        void WaitStop()
+        {
+            var t = stopTh; if (t == null) return;
+            waitingStop = true;
+            try { while (t.IsAlive) { Application.DoEvents(); Thread.Sleep(15); } } finally { waitingStop = false; stopTh = null; }
+        }
         void StopRec()
         {
             if (state != St.Rec && state != St.Paused) return;
+            if (waitingStop) return;
             try { KeyLog.Stop(); } catch { }
-            if (state == St.Rec) { sw.Stop(); acc += sw.Elapsed; sw.Reset(); eng.StopSegment(); }
+            bool wasRec = state == St.Rec; int tailMs = TailMs(); var pend = stopTh; stopTh = null;
+            if (wasRec) { sw.Stop(); acc += sw.Elapsed; sw.Reset(); }
             ApplyExclude(false);   // v7: запись остановлена — прибор снова виден скриншотам
             HideRegionFrame();     // v11
             ui.RecK = 1f;
@@ -5297,9 +5348,11 @@ namespace XyzRecorder
             string of = outFile;
             var th = new Thread(() =>
             {
+                if (pend != null) pend.Join();   // пауза: сегмент уже останавливается
+                if (wasRec) eng.StopSegment(tailMs);   // v19.17: «q» через rec_tail_ms — звук дописывается до момента нажатия
                 bool ok = eng.Finalize(of);
-                if (ok && keysRec)   // v19.12: длительности сегментов — для привязки событий к кадрам (до удаления сегментов)
-                { try { var sd = new List<double>(); foreach (var sg in eng.Segments) sd.Add(TrimForm.Duration(sg)); KeyLog.SegDur = sd; KeyLog.SegFfStart = new List<double>(eng.SegStarts); KeyLog.SegSrc = new List<string>(eng.SegModes); } catch (Exception sx) { AppLog.W("нажатия: длительности сегментов: " + sx.Message); } }
+                if (ok && keysRec)   // v19.12: длительности сегментов — для привязки событий к кадрам (до удаления сегментов); v19.17 — обрезанные
+                { try { var sd = new List<double>(); for (int si = 0; si < eng.Segments.Count; si++) sd.Add(eng.SegLen(si)); KeyLog.SegDur = sd; KeyLog.SegFfStart = new List<double>(eng.SegStarts); KeyLog.SegSrc = new List<string>(eng.SegModes); } catch (Exception sx) { AppLog.W("нажатия: длительности сегментов: " + sx.Message); } }
                 if (ok) eng.CleanupSegments();
                 if (ok && keysRec && (KeyLog.Events.Count > 0 || KeyLog.Moves.Count > 0))   // v19.8: нажатия и курсор поверх видео
                 {
