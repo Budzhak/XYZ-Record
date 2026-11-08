@@ -1,4 +1,7 @@
-﻿// XYZ Запись v19.13 (09.11.2026): подсветка курсора и щелчки без отставания на 5 кадров (сдвиг по часам первого кадра). v19.12 (08.11.2026): показ мыши и клавиш как у Bandicam — подсветка курсора мягким градиентом без отставания
+﻿// XYZ Запись v19.14 (09.11.2026): ddagrab — метка кадра по часам в момент захвата (setpts=RTCTIME внутри lavfi вместо
+// -use_wallclock_as_timestamps), строка привязки нажатий/курсора (источник, ключи входа, сдвиг X, «секундомер−файл» Y) — в recorder.log;
+// запасная поправка для ddagrab — ini mk_dda_shift (с, + = подсветку позже; по умолчанию 0).
+// XYZ Запись v19.13 (09.11.2026): подсветка курсора и щелчки без отставания на 5 кадров (сдвиг по часам первого кадра). v19.12 (08.11.2026): показ мыши и клавиш как у Bandicam — подсветка курсора мягким градиентом без отставания
 // (время событий привязано к кадрам, интерполяция на каждый кадр), щелчки красный/синий, клавиши крупным белым текстом
 // с обводкой (9 позиций, 3 размера, «все нажатия»), окно «Мышь и клавиатура…» (ini mk_*), «Показывать курсор» (draw_mouse).
 // Проверка: --keystest <mp4> [all] → test\keystest.mp4 / keystest_all.mp4; --snapshot-mousekeys → test\mk19\mousekeys.png.
@@ -510,7 +513,9 @@ namespace XyzRecorder
         // v19.13: время (Unix, с) первого кадра каждого сегмента — из строки ffmpeg «Duration: …, start: X» первого входа
         // (часы Windows, как DateTime.UtcNow). NaN — не узнали. Нужно, чтобы привязать подсветку/щелчки/клавиши к кадрам.
         public List<double> SegStarts = new List<double>();
-        double curStart = double.NaN;
+        public List<string> SegModes = new List<string>();   // v19.14: чем писался каждый сегмент (ddagrab / gdigrab) и ключи входа — для recorder.log
+        public List<string> SegInputs = new List<string>();
+        double curStart = double.NaN; string curInput = "";
         static readonly System.Text.RegularExpressions.Regex StartRx = new System.Text.RegularExpressions.Regex(@"^\s*Duration:.*?,\s*start:\s*(-?\d+\.\d+)");
         public string LastError = "";
         // v13: захват — Desktop Duplication (ddagrab), исключает окна с WDA_EXCLUDEFROMCAPTURE; gdigrab — запасной.
@@ -782,13 +787,14 @@ namespace XyzRecorder
             var sb = new StringBuilder("ddagrab=output_idx=" + best.Idx + ":framerate=15:draw_mouse=" + (DrawMouse ? 1 : 0));
             if (r != best.Bounds)
                 sb.AppendFormat(":video_size={0}x{1}:offset_x={2}:offset_y={3}", r.Width, r.Height, r.X - best.Bounds.X, r.Y - best.Bounds.Y);
+            // v19.14: метка времени кадра — часы Windows (мкс) сразу после ddagrab, т. е. в момент захвата (а не когда ffmpeg забрал кадр);
+            // ffmpeg печатает время первого кадра («start: …») — по нему подсветка курсора привязывается к кадрам
+            sb.Append(",settb=1/1000000,setpts=RTCTIME/(1000000*TB)");
             sb.Append(",hwdownload,format=bgra");
             CapRect = r;
             string info = "ddagrab: монитор " + best + ", кадр " + r + (r != want ? " (запрошено " + want + ", обрезано по монитору)" : "");
             Log(info);
-            // v19.13: у ddagrab метки кадров от нуля — с -use_wallclock_as_timestamps они по часам Windows, как у gdigrab,
-            // и ffmpeg печатает время первого кадра («start: …») — по нему подсветка курсора привязывается к кадрам
-            return "-thread_queue_size 1024 -use_wallclock_as_timestamps 1 -f lavfi -i \"" + sb + "\" ";
+            return "-thread_queue_size 1024 -f lavfi -i \"" + sb + "\" ";
         }
 
         bool StartSegment2(string videoIn, string mode)
@@ -806,7 +812,7 @@ namespace XyzRecorder
             if (mic) a.Append("-af aresample=async=1 -c:a aac -b:a 96k ");
             a.Append("\"" + curSeg + "\"");
             Log("=== " + DateTime.Now.ToString("HH:mm:ss") + " ffmpeg " + a);
-            lock (lk) { tail.Length = 0; curStart = double.NaN; }
+            lock (lk) { tail.Length = 0; curStart = double.NaN; curInput = videoIn.Trim(); }
             started.Reset();
             var p = new Process();
             p.StartInfo = Psi(Ffmpeg, a.ToString(), true);
@@ -863,7 +869,12 @@ namespace XyzRecorder
             p.WaitForExit();
             proc = null;
             bool ok = File.Exists(curSeg) && new FileInfo(curSeg).Length > 1000;
-            if (ok) { Segments.Add(curSeg); double st; lock (lk) st = curStart; SegStarts.Add(st > 1e9 ? st : double.NaN); }
+            if (ok)
+            {
+                Segments.Add(curSeg); double st; string inp; lock (lk) { st = curStart; inp = curInput; }
+                SegStarts.Add(st > 1e9 ? st : double.NaN); SegModes.Add(CapMode); SegInputs.Add(inp);
+                AppLog.W("сегмент " + (Segments.Count - 1) + ": " + CapMode + ", первый кадр (start) " + (st > 1e9 ? st.ToString("0.000000", System.Globalization.CultureInfo.InvariantCulture) : "не найден (" + st.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")") + ", вход: " + inp);   // v19.14
+            }
             else lock (lk) LastError = "Сегмент не записан:\n" + Tail(1500);
             return ok;
         }
@@ -2928,6 +2939,8 @@ namespace XyzRecorder
         // v19.13: часы Windows (Unix, с) в момент старта секундомера каждого сегмента и время первого кадра сегмента от ffmpeg
         public static readonly List<double> SegWall = new List<double>();
         public static List<double> SegFfStart;
+        public static List<string> SegSrc;     // v19.14: ddagrab / gdigrab по сегментам
+        public static double DdaShift = 0;     // v19.14: запасная поправка для ddagrab, с (ini mk_dda_shift; + — подсветка/щелчки/клавиши позже)
         static double UnixNow() { return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds; }
         public static void Pause()
         {
@@ -2968,6 +2981,7 @@ namespace XyzRecorder
             ClickSize = Int(c, "mk_click_size", 100, 30, 300); KeyPos = Int(c, "mk_key_pos", 6, 0, 8); KeySize = Int(c, "mk_key_size", 1, 0, 2);
             HaloColor = ColParse(c.Get("mk_halo_color", ""), Color.FromArgb(255, 235, 59));
             ClickL = ColParse(c.Get("mk_click_l", ""), Color.FromArgb(255, 45, 45)); ClickR = ColParse(c.Get("mk_click_r", ""), Color.FromArgb(40, 120, 255));
+            double ds; DdaShift = double.TryParse(c.Get("mk_dda_shift", "0").Replace(',', '.'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ds) ? Math.Max(-1, Math.Min(1, ds)) : 0;
         }
         public static void SaveCfg(Settings c)
         {
@@ -2975,6 +2989,7 @@ namespace XyzRecorder
             c.Set("mk_keyall", KeyAll ? "1" : "0"); c.Set("mk_halo_size", HaloSize.ToString()); c.Set("mk_halo_op", HaloOp.ToString());
             c.Set("mk_click_size", ClickSize.ToString()); c.Set("mk_key_pos", KeyPos.ToString()); c.Set("mk_key_size", KeySize.ToString());
             c.Set("mk_halo_color", ColStr(HaloColor)); c.Set("mk_click_l", ColStr(ClickL)); c.Set("mk_click_r", ColStr(ClickR));
+            c.Set("mk_dda_shift", DdaShift.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));   // v19.14: ключ виден в ini, чтобы его можно было поправить
             c.Save();
         }
 
@@ -2992,7 +3007,7 @@ namespace XyzRecorder
         [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string n);
         public static void Start()
         {
-            lock (Events) Events.Clear(); lock (Moves) Moves.Clear(); lock (SegClk) { SegClk.Clear(); SegWall.Clear(); } SegDur = null; SegFfStart = null; lastMove = -1; typBuf = ""; typLast = -10;
+            lock (Events) Events.Clear(); lock (Moves) Moves.Clear(); lock (SegClk) { SegClk.Clear(); SegWall.Clear(); } SegDur = null; SegFfStart = null; SegSrc = null; lastMove = -1; typBuf = ""; typLast = -10;
             accT = 0; clk.Reset(); Resume();
             if (hookThread != null) return;
             var ready = new ManualResetEvent(false);
@@ -3182,12 +3197,14 @@ namespace XyzRecorder
         // в основном с КОНЦА (секундомер останавливается до «q», ffmpeg дописывает хвост; длина файла — по самому длинному
         // потоку, со звуком), и всё это ошибочно уходило в начало: у db подсветка, щелчки и клавиши опаздывали на 5 кадров
         // (0,33 с при 15 к/с) по всему ролику. Время первого кадра не узнали — без сдвига (ошибка не больше задержки старта ffmpeg).
+        // v19.14: важное — и в ffmpeg.log (временная папка, удаляется), и в %APPDATA%\XYZ\recorder.log
+        static void Both(Action<string> log, string s) { if (log != null) log(s); AppLog.W(s); }
         static Func<double, double> Mapper(double outDur, Action<string> log)
         {
             List<double[]> sc; List<double> sw; lock (SegClk) { sc = new List<double[]>(SegClk); sw = new List<double>(SegWall); }
-            var sd = SegDur; var fs = SegFfStart;
+            var sd = SegDur; var fs = SegFfStart; var src = SegSrc;
             var inv = System.Globalization.CultureInfo.InvariantCulture;
-            if (sc.Count == 0) return t => Math.Max(0, t);
+            if (sc.Count == 0) { Both(log, "=== нажатия/курсор: нет сегментов секундомера — без сдвига"); return t => Math.Max(0, t); }
             int n = sc.Count;
             bool haveDur = sd != null && sd.Count == n && !sd.Contains(0);
             var vs = new double[n]; var off = new double[n]; double acc = 0;
@@ -3199,10 +3216,13 @@ namespace XyzRecorder
                 if (fs != null && fs.Count == n && sw.Count == n && !double.IsNaN(fs[i])) o = sw[i] - fs[i];
                 if (double.IsNaN(o) || o < -0.5 || o > 3) { sb.Append(double.IsNaN(o) ? " ?" : string.Format(inv, " {0:0.000}(отброшен)", o)); o = 0; }
                 else sb.AppendFormat(inv, " {0:0.000}", o);
+                string m = src != null && src.Count == n ? src[i] : "?";
+                if (m == "ddagrab" && DdaShift != 0) { o += DdaShift; sb.AppendFormat(inv, " +mk_dda_shift {0:0.000}", DdaShift); }   // v19.14: запасная поправка
+                sb.Append(" (" + m + ")");
                 off[i] = o;
                 if (haveDur) sb.AppendFormat(inv, " [секундомер−файл {0:0.000}]", (sc[i][1] - sc[i][0]) - sd[i]);   // для разбора: раньше это считалось сдвигом
             }
-            if (log != null) log("=== нажатия/курсор: " + sb);
+            Both(log, "=== нажатия/курсор: " + sb);
             return t =>
             {
                 int i = n - 1; for (int j = 0; j < n; j++) if (t < sc[j][1]) { i = j; break; }
@@ -3322,7 +3342,7 @@ namespace XyzRecorder
                 var psi = new ProcessStartInfo(ff, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
                 string tail;
                 using (var p = Process.Start(psi)) { tail = p.StandardError.ReadToEnd(); p.WaitForExit(); if (p.ExitCode != 0 || !File.Exists(outFile)) { err = tail.Length > 800 ? tail.Substring(tail.Length - 800) : tail; return false; } }
-                if (log != null) log("=== нажатия/курсор: " + n + " меток наложено, кадр " + VW + "x" + VH + " " + fps.ToString("0.##", inv) + " к/с, точек курсора " + mv.Count);
+                Both(log, "=== нажатия/курсор: " + n + " меток наложено, кадр " + VW + "x" + VH + " " + fps.ToString("0.##", inv) + " к/с, точек курсора " + mv.Count);
                 return true;
             }
             catch (Exception ex) { err = ex.Message; return false; }
@@ -4078,7 +4098,7 @@ namespace XyzRecorder
 
     class AboutForm : Form
     {
-        public const string Version = "v19.13";
+        public const string Version = "v19.14";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -5090,7 +5110,7 @@ namespace XyzRecorder
             eng.MicName = m != null ? m.Name : null;
             if (testing) return;
             KeyLog.LoadCfg(cfg); Engine.DrawMouse = KeyLog.Cursor;   // v19.12
-            eng.Segments.Clear(); eng.SegStarts.Clear();
+            eng.Segments.Clear(); eng.SegStarts.Clear(); eng.SegModes.Clear(); eng.SegInputs.Clear();
             eng.WorkDir = Path.Combine(Path.GetTempPath(), "xyz_rec", DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             Directory.CreateDirectory(eng.WorkDir);
             acc = TimeSpan.Zero; sw.Reset();
@@ -5185,15 +5205,15 @@ namespace XyzRecorder
             {
                 bool ok = eng.Finalize(of);
                 if (ok && keysRec)   // v19.12: длительности сегментов — для привязки событий к кадрам (до удаления сегментов)
-                { try { var sd = new List<double>(); foreach (var sg in eng.Segments) sd.Add(TrimForm.Duration(sg)); KeyLog.SegDur = sd; KeyLog.SegFfStart = new List<double>(eng.SegStarts); } catch { } }
+                { try { var sd = new List<double>(); foreach (var sg in eng.Segments) sd.Add(TrimForm.Duration(sg)); KeyLog.SegDur = sd; KeyLog.SegFfStart = new List<double>(eng.SegStarts); KeyLog.SegSrc = new List<string>(eng.SegModes); } catch (Exception sx) { AppLog.W("нажатия: длительности сегментов: " + sx.Message); } }
                 if (ok) eng.CleanupSegments();
                 if (ok && keysRec && (KeyLog.Events.Count > 0 || KeyLog.Moves.Count > 0))   // v19.8: нажатия и курсор поверх видео
                 {
                     try { BeginInvoke(new Action(() => SetStatus("Добавляю нажатия клавиш…", false))); } catch { }
                     string kt = Path.Combine(eng.WorkDir, "keys_" + Path.GetFileName(of)); string kerr;
                     if (KeyLog.Burn(ffmpeg, of, kt, eng.CapRect, eng.WorkDir, eng.Log, out kerr))
-                    { try { File.Delete(of); File.Move(kt, of); } catch (Exception kx) { eng.Log("нажатия: не заменил файл: " + kx.Message); } }
-                    else eng.Log("нажатия: не наложены: " + kerr);
+                    { try { File.Delete(of); File.Move(kt, of); } catch (Exception kx) { eng.Log("нажатия: не заменил файл: " + kx.Message); AppLog.W("нажатия: не заменил файл: " + kx.Message); } }
+                    else { eng.Log("нажатия: не наложены: " + kerr); AppLog.W("нажатия: не наложены: " + kerr); }   // v19.14
                 }
                 int voice = 0;   // 0 — не обрабатывали, 1 — звук улучшен, −1 — ошибка (оставлен исходный)
                 if (ok && doVoice)
