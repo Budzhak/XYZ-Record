@@ -1,4 +1,6 @@
-﻿// XYZ Запись v19.15 (09.11.2026): сдвиг первого кадра до 20 с принимается (у db ffmpeg стартовал 4 с — события уезжали на 4 с). v19.14 (09.11.2026): ddagrab — метка кадра по часам в момент захвата (setpts=RTCTIME внутри lavfi вместо
+﻿// XYZ Запись v19.16 (09.11.2026): окно «Обрезать» растягивается за края и углы, кнопка «развернуть/восстановить» и двойной щелчок
+// по заголовку, видео и дорожка подстраиваются под размер; размер, положение и развёрнутость — в ini (trim_bounds, trim_max).
+// XYZ Запись v19.15 (09.11.2026): сдвиг первого кадра до 20 с принимается (у db ffmpeg стартовал 4 с — события уезжали на 4 с). v19.14 (09.11.2026): ddagrab — метка кадра по часам в момент захвата (setpts=RTCTIME внутри lavfi вместо
 // -use_wallclock_as_timestamps), строка привязки нажатий/курсора (источник, ключи входа, сдвиг X, «секундомер−файл» Y) — в recorder.log;
 // запасная поправка для ddagrab — ini mk_dda_shift (с, + = подсветку позже; по умолчанию 0.1 — замер 09.11: без поправки −2 кадра, с 0.1 — +1).
 // XYZ Запись v19.13 (09.11.2026): подсветка курсора и щелчки без отставания на 5 кадров (сдвиг по часам первого кадра). v19.12 (08.11.2026): показ мыши и клавиш как у Bandicam — подсветка курсора мягким градиентом без отставания
@@ -492,8 +494,10 @@ namespace XyzRecorder
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(PathIni));
+                // v19.16: ключи, которых нет у этого процесса (их записал другой — например, окно «Обрезать» отдельным процессом), не теряем
+                var all = Load().D; foreach (var kv in D) all[kv.Key] = kv.Value;
                 var sb = new StringBuilder();
-                foreach (var kv in D) sb.Append(kv.Key).Append('=').Append(kv.Value).Append("\r\n");
+                foreach (var kv in all) sb.Append(kv.Key).Append('=').Append(kv.Value).Append("\r\n");
                 File.WriteAllText(PathIni, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -2849,6 +2853,18 @@ namespace XyzRecorder
     class XyzForm : Form
     {
         protected string Caption = ""; protected const int HeadH = 40; Rectangle closeR; bool closeHot; Point dragFrom; bool dragging;
+        // v19.16: растягиваемое окно без рамки — края/углы через WM_NCHITTEST, своя кнопка «развернуть» (рабочая область монитора)
+        protected bool Sizable; Rectangle maxR; bool maxHot; bool maxed; Rectangle restoreR; const int Grip = 7;
+        public bool Maxed { get { return maxed; } }
+        public Rectangle NormalBounds { get { return maxed ? restoreR : Bounds; } }
+        public void SetMaxed(bool on)
+        {
+            if (!Sizable || on == maxed) return;
+            if (on) { restoreR = Bounds; maxed = true; Bounds = Screen.FromRectangle(Bounds).WorkingArea; }
+            else { maxed = false; if (restoreR.Width > 0) Bounds = restoreR; }
+            Invalidate();
+        }
+        public void SetRestore(Rectangle r) { restoreR = r; }
         public XyzForm()
         {
             FormBorderStyle = FormBorderStyle.None; DoubleBuffered = true; BackColor = Theme.Shade(Color.FromArgb(18, 21, 25));
@@ -2864,9 +2880,22 @@ namespace XyzRecorder
             var em = Ui19.Trim(Res.Get("emblem", 0.5f));
             int x = 14, eh = HeadH - 12;
             if (em != null) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; int ew = eh * em.Width / Math.Max(1, em.Height); g.DrawImage(em, new Rectangle(x, 7, ew, eh)); x += ew + 10; }
-            TextRenderer.DrawText(g, Caption, Theme.Px(Theme.UiSemi, 14f, FontStyle.Regular), new Rectangle(x, 0, Width - x - 50, HeadH + 2), Theme.Teal, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, Caption, Theme.Px(Theme.UiSemi, 14f, FontStyle.Regular), new Rectangle(x, 0, Width - x - (Sizable ? 84 : 50), HeadH + 2), Theme.Teal, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             closeR = new Rectangle(Width - 38, (HeadH - 26) / 2 + 2, 26, 26);
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (Sizable)   // v19.16: «развернуть» (квадрат) / «восстановить» (два квадрата)
+            {
+                maxR = new Rectangle(closeR.X - 34, closeR.Y, 26, 26);
+                if (maxHot) using (var b = new SolidBrush(Color.FromArgb(60, 255, 255, 255))) g.FillEllipse(b, maxR);
+                g.SmoothingMode = SmoothingMode.None;
+                using (var pen = new Pen(maxHot ? Color.White : Theme.Mute, 1.4f))
+                {
+                    int cx = maxR.X + 13, cy = maxR.Y + 13;
+                    if (!maxed) g.DrawRectangle(pen, cx - 5, cy - 5, 10, 10);
+                    else { g.DrawRectangle(pen, cx - 5, cy - 2, 8, 8); g.DrawLine(pen, cx - 2, cy - 5, cx + 5, cy - 5); g.DrawLine(pen, cx + 5, cy - 5, cx + 5, cy + 2); }
+                }
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+            }
             if (closeHot) using (var b = new SolidBrush(Color.FromArgb(150, 200, 50, 46))) g.FillEllipse(b, closeR);
             using (var pen = new Pen(closeHot ? Color.White : Theme.Mute, 1.6f)) { var c = new PointF(closeR.X + 13, closeR.Y + 13); g.DrawLine(pen, c.X - 5, c.Y - 5, c.X + 5, c.Y + 5); g.DrawLine(pen, c.X - 5, c.Y + 5, c.X + 5, c.Y - 5); }
             using (var pen = new Pen(Color.FromArgb(28, 255, 255, 255))) g.DrawLine(pen, 14, HeadH + 1, Width - 14, HeadH + 1);
@@ -2874,18 +2903,50 @@ namespace XyzRecorder
         protected override void OnMouseMove(MouseEventArgs e)
         {
             bool h = closeR.Contains(e.Location); if (h != closeHot) { closeHot = h; Invalidate(closeR); }
-            if (dragging) { var p = PointToScreen(e.Location); Location = new Point(p.X - dragFrom.X, p.Y - dragFrom.Y); }
+            if (Sizable) { bool mh = maxR.Contains(e.Location); if (mh != maxHot) { maxHot = mh; Invalidate(maxR); } }
+            if (dragging && maxed && (Math.Abs(e.X - dragFrom.X) > 4 || Math.Abs(e.Y - dragFrom.Y) > 4))
+            {
+                // v19.16: потянули развёрнутое окно за заголовок — восстанавливаем размер, курсор остаётся на той же доле заголовка
+                double rx = e.X / (double)Math.Max(1, Width); var sp = PointToScreen(e.Location);
+                maxed = false; var r = restoreR.Width > 0 ? restoreR : new Rectangle(0, 0, MinimumSize.Width, MinimumSize.Height);
+                dragFrom = new Point((int)(rx * r.Width), Math.Min(e.Y, HeadH - 4));
+                Bounds = new Rectangle(sp.X - dragFrom.X, sp.Y - dragFrom.Y, r.Width, r.Height); Invalidate();
+            }
+            else if (dragging && !maxed) { var p = PointToScreen(e.Location); Location = new Point(p.X - dragFrom.X, p.Y - dragFrom.Y); }
             base.OnMouseMove(e);
         }
-        protected override void OnMouseLeave(EventArgs e) { if (closeHot) { closeHot = false; Invalidate(closeR); } base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { if (closeHot) { closeHot = false; Invalidate(closeR); } if (maxHot) { maxHot = false; Invalidate(maxR); } base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left && closeR.Contains(e.Location)) { Close(); return; }
+            if (Sizable && e.Button == MouseButtons.Left && maxR.Contains(e.Location)) { SetMaxed(!maxed); return; }
+            if (Sizable && e.Button == MouseButtons.Left && e.Clicks == 2 && e.Y < HeadH) { dragging = false; SetMaxed(!maxed); return; }   // v19.16: двойной щелчок по заголовку
             if (e.Button == MouseButtons.Left && e.Y < HeadH) { dragging = true; dragFrom = e.Location; }
             base.OnMouseDown(e);
         }
         protected override void OnMouseUp(MouseEventArgs e) { dragging = false; base.OnMouseUp(e); }
         protected override void OnResize(EventArgs e) { base.OnResize(e); Invalidate(); }   // v19: углы прямые — скругление через Region даёт рваный край (замечание db 01:10)
+        // v19.16: края и углы для растягивания; на время растягивания — WS_EX_COMPOSITED (дочерние панели без мерцания)
+        [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
+        [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+        protected override void WndProc(ref Message m)
+        {
+            if (Sizable && m.Msg == 0x0084 && !maxed)   // WM_NCHITTEST
+            {
+                base.WndProc(ref m);
+                if ((int)m.Result != 1) return;   // не клиентская часть — как есть
+                long lp = m.LParam.ToInt64();
+                var p = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                bool l = p.X < Grip, r = p.X >= ClientSize.Width - Grip, t = p.Y < Grip, b = p.Y >= ClientSize.Height - Grip;
+                int ht = t && l ? 13 : t && r ? 14 : b && l ? 16 : b && r ? 17 : l ? 10 : r ? 11 : t ? 12 : b ? 15 : 1;
+                // углы — пошире, чтобы было легче попасть
+                if (ht == 1 && p.X >= ClientSize.Width - Grip * 2 && p.Y >= ClientSize.Height - Grip * 2) ht = 17;
+                m.Result = (IntPtr)ht; return;
+            }
+            if (Sizable && m.Msg == 0x0231 && IsHandleCreated) SetWindowLong(Handle, -20, GetWindowLong(Handle, -20) | 0x02000000);   // WM_ENTERSIZEMOVE
+            if (Sizable && m.Msg == 0x0232 && IsHandleCreated) { SetWindowLong(Handle, -20, GetWindowLong(Handle, -20) & ~0x02000000); Invalidate(true); }   // WM_EXITSIZEMOVE
+            base.WndProc(ref m);
+        }
     }
 
     class SavedToast : XyzForm
@@ -3643,7 +3704,8 @@ namespace XyzRecorder
         {
             file = path; ff = Engine.FindFfmpeg();
             Text = "Обрезать — XYZ Запись · " + Path.GetFileName(path); Caption = "Обрезать  ·  " + Path.GetFileName(path);
-            StartPosition = FormStartPosition.CenterScreen; KeyPreview = true; Size = new Size(1100, 860); MinimumSize = new Size(700, 520);
+            StartPosition = FormStartPosition.CenterScreen; KeyPreview = true; Size = new Size(1100, 860); MinimumSize = new Size(760, 520);
+            Sizable = true; LoadPlace();   // v19.16
             tmpDir = Path.Combine(Path.GetTempPath(), "xyz_trim_" + Guid.NewGuid().ToString("N").Substring(0, 8)); Directory.CreateDirectory(tmpDir);
             var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(2, 2, 2, 4), WrapContents = false, BackColor = Color.Transparent };
             var bPlay = Ui19.Btn("▶ Прослушать (пробел)", false); bPlay.Click += (o, e) => TogglePlay();
@@ -3657,12 +3719,44 @@ namespace XyzRecorder
             wave = new WavePanel(this) { Dock = DockStyle.Fill };
             video = new VideoPanel(this) { Dock = DockStyle.Top, Height = 560 };
             Controls.Add(wave); Controls.Add(video); Controls.Add(top); Controls.Add(info);
-            Resize += (o, e) => LayoutVideo(); Load += (o, e) => LayoutVideo();
+            Resize += (o, e) => { LayoutVideo(); if (wave != null) wave.Invalidate(); if (video != null) video.Invalidate(); };   // v19.16: видео и дорожка — по новому размеру
+            Load += (o, e) => { LayoutVideo(); if (startMax) SetMaxed(true); };
+            FormClosing += (o, e) => SavePlace();
             KeyDown += OnKey;
             tick.Interval = 30; tick.Tick += (o, e) => { if (playing) { double et = playFrom + playSw.Elapsed.TotalSeconds; Head = ToSrc(Math.Min(et, playTo)); if (et >= playTo) StopPlay(); wave.Invalidate(); } };
             Shown += (o, e) => { Application.AddMessageFilter(this); }; FormClosed += (o, e) => { Application.RemoveMessageFilter(this); };
             Shown += (o, e) => { Cursor = Cursors.WaitCursor; var th = new Thread(Load2); th.IsBackground = true; th.Start(); var tf = new Thread(LoadFrames); tf.IsBackground = true; tf.Start(); };
             FormClosed += (o, e) => { StopPlay(); try { Directory.Delete(tmpDir, true); } catch { } };
+        }
+        // v19.16: размер/положение/развёрнутость окна — в ini (trim_bounds = x,y,w,h — обычный размер; trim_max = 1 — развёрнуто)
+        bool startMax;
+        void LoadPlace()
+        {
+            if (Settings.ReadOnly) return;   // снимки/самопроверка — размер по умолчанию
+            try
+            {
+                var c = Settings.Load(); var p = c.Get("trim_bounds", "").Split(',');
+                if (p.Length == 4)
+                {
+                    var r = new Rectangle(int.Parse(p[0]), int.Parse(p[1]), Math.Max(MinimumSize.Width, int.Parse(p[2])), Math.Max(MinimumSize.Height, int.Parse(p[3])));
+                    bool vis = false; foreach (var sc in Screen.AllScreens) { var i = Rectangle.Intersect(sc.WorkingArea, r); if (i.Width >= 200 && i.Height >= 100) vis = true; }
+                    if (vis) { StartPosition = FormStartPosition.Manual; Bounds = r; SetRestore(r); }
+                }
+                startMax = c.Get("trim_max", "0") == "1";
+            }
+            catch { }
+        }
+        void SavePlace()
+        {
+            if (Settings.ReadOnly || WindowState == FormWindowState.Minimized) return;
+            try
+            {
+                var r = NormalBounds; if (r.Width < 100 || r.Height < 100) return;
+                var c = Settings.Load();
+                c.Set("trim_bounds", r.X + "," + r.Y + "," + r.Width + "," + r.Height); c.Set("trim_max", Maxed ? "1" : "0");
+                c.Save();
+            }
+            catch { }
         }
         void LayoutVideo()
         {
@@ -4098,7 +4192,7 @@ namespace XyzRecorder
 
     class AboutForm : Form
     {
-        public const string Version = "v19.15";
+        public const string Version = "v19.16";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
