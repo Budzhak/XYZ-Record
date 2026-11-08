@@ -1,4 +1,8 @@
-﻿// XYZ Запись v19.11 (07.11.2026): новогодний облик «Новогодний» — шапка Деда Мороза с помпоном на эмблеме (res/hat@1x|2x.png).
+﻿// XYZ Запись v19.12 (08.11.2026): показ мыши и клавиш как у Bandicam — подсветка курсора мягким градиентом без отставания
+// (время событий привязано к кадрам, интерполяция на каждый кадр), щелчки красный/синий, клавиши крупным белым текстом
+// с обводкой (9 позиций, 3 размера, «все нажатия»), окно «Мышь и клавиатура…» (ini mk_*), «Показывать курсор» (draw_mouse).
+// Проверка: --keystest <mp4> [all] → test\keystest.mp4 / keystest_all.mp4; --snapshot-mousekeys → test\mk19\mousekeys.png.
+// XYZ Запись v19.11 (07.11.2026): новогодний облик «Новогодний» — шапка Деда Мороза с помпоном на эмблеме (res/hat@1x|2x.png).
 // XYZ Запись v19 (05.11.2026): облики-палитры «как в Winamp» — меню «Цвет облика ▸»: Мятный, Нуар, Чёрно-красный,
 // Чёрно-бело-красный, Зелёно-красный. Эмблема не меняется; перекрашиваются корпус (ColorMatrix), подсветка и меню. ini: palette=<id>.
 // XYZ Запись v18 (01.11.2026): новый значок приложения — виниловая пластинка (xyz_rec_vinyl.ico: /win32icon и ресурс app.ico — окно, трей). Код как в v17.
@@ -506,6 +510,7 @@ namespace XyzRecorder
         public string LastError = "";
         // v13: захват — Desktop Duplication (ddagrab), исключает окна с WDA_EXCLUDEFROMCAPTURE; gdigrab — запасной.
         public bool PreferDda = true;
+        public static bool DrawMouse = true;   // v19.12: «Показывать курсор в записи» (окно «Мышь и клавиатура»)
         public static bool DdaBroken;      // ddagrab не запустился в этом сеансе — дальше сразу gdigrab
         public string CapMode = "";        // "ddagrab" / "gdigrab" — чем пишется текущий сегмент
         public Rectangle CapRect;          // что реально попадает в кадр (экранные физические координаты)
@@ -738,7 +743,7 @@ namespace XyzRecorder
 
         string GdiInput()
         {
-            var a = new StringBuilder("-thread_queue_size 1024 -f gdigrab -framerate 15 -draw_mouse 1 ");
+            var a = new StringBuilder("-thread_queue_size 1024 -f gdigrab -framerate 15 -draw_mouse " + (DrawMouse ? 1 : 0) + " ");
             if (Area.HasValue)
             {
                 var r = Area.Value;
@@ -769,7 +774,7 @@ namespace XyzRecorder
             var r = Rectangle.Intersect(best.Bounds, want);
             r = new Rectangle(r.X, r.Y, r.Width & ~1, r.Height & ~1);
             if (r.Width < 16 || r.Height < 16) { why = "область слишком мала"; return null; }
-            var sb = new StringBuilder("ddagrab=output_idx=" + best.Idx + ":framerate=15:draw_mouse=1");
+            var sb = new StringBuilder("ddagrab=output_idx=" + best.Idx + ":framerate=15:draw_mouse=" + (DrawMouse ? 1 : 0));
             if (r != best.Bounds)
                 sb.AppendFormat(":video_size={0}x{1}:offset_x={2}:offset_y={3}", r.Width, r.Height, r.X - best.Bounds.X, r.Y - best.Bounds.Y);
             sb.Append(",hwdownload,format=bgra");
@@ -2889,27 +2894,74 @@ namespace XyzRecorder
         protected override void Dispose(bool d) { if (d) life.Dispose(); base.Dispose(d); }
     }
 
-    // v19.8: показ нажатий в ролике — во время записи ловим сочетания клавиш и щелчки мыши
-    // (обычный набор текста НЕ записывается — только Ctrl/Alt/Win + клавиша и служебные: Esc, Tab, Enter, Del, Backspace, F1–F12),
-    // после «Стоп» ffmpeg рисует их поверх видео: табличка слева внизу и кружки на месте щелчка. На экране у пользователя ничего нет.
+    // v19.8: показ нажатий в ролике — во время записи ловим сочетания клавиш и щелчки мыши,
+    // после «Стоп» ffmpeg рисует их поверх видео. На экране у пользователя ничего нет.
+    // v19.12 (замечания db): как у Bandicam — подсветка курсора мягким радиальным градиентом и без отставания
+    // (время событий привязано к кадрам ролика: по каждому сегменту вычитается задержка старта ffmpeg,
+    // положение курсора интерполируется на каждый кадр); щелчки — красная (левая) / синяя (правая) мягкая вспышка;
+    // клавиши — крупный белый жирный текст с тёмной обводкой без плашки, 9 позиций, 3 размера, режим «все нажатия»
+    // (набор склеивается в строку). Настройки — окно «Мышь и клавиатура» (MouseKeysForm), ini: mk_*.
     static class KeyLog
     {
-        public class Ev { public double T; public string Text; public int X, Y, Kind; }   // Kind: 0 — клавиши, 1 — левая, 2 — правая, 3 — средняя
+        public class Ev { public double T; public string Text; public int X, Y, Kind; public bool Typ; }   // Kind: 0 — клавиши, 1 — левая, 2 — правая, 3 — средняя
         public static readonly List<Ev> Events = new List<Ev>();
-        // v19.9: хуки — на своём потоке с циклом сообщений (на занятом UI-потоке прибора они тормозили мышь у всей системы,
-        // а Windows молча снимала клавиатурный хук по таймауту). Время — свой секундомер, без обращений к окну.
-        static readonly Stopwatch clk = new Stopwatch(); static double accT = 0; static volatile bool active;
+        // v19.9: хуки — на своём потоке с циклом сообщений. Время — свой секундомер, без обращений к окну.
+        static readonly Stopwatch clk = new Stopwatch(); static double accT = 0, segT0 = 0; static volatile bool active;
         static double Clock() { return accT + clk.Elapsed.TotalSeconds; }
-        public static void Pause() { if (clk.IsRunning) { accT += clk.Elapsed.TotalSeconds; clk.Reset(); } active = false; }
-        public static void Resume() { clk.Restart(); active = true; }
+        // v19.12: границы сегментов по секундомеру (пауза = новый сегмент ffmpeg) и длительности сегментов-файлов
+        public static readonly List<double[]> SegClk = new List<double[]>();
+        public static List<double> SegDur;
+        public static void Pause()
+        {
+            if (clk.IsRunning) { accT += clk.Elapsed.TotalSeconds; clk.Reset(); lock (SegClk) SegClk.Add(new[] { segT0, accT }); }
+            active = false;
+        }
+        public static void Resume()
+        {
+            segT0 = accT; clk.Restart(); active = true;
+            if (Halo) { POINT p; if (GetCursorPos(out p)) lock (Moves) Moves.Add(new Ev { T = accT, X = p.X, Y = p.Y }); }   // курсор виден с первого кадра
+        }
         static Thread hookThread; static uint hookTid;
+        [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+        [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
         [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] static extern bool PostThreadMessage(uint tid, uint msg, IntPtr w, IntPtr l);
         [StructLayout(LayoutKind.Sequential)] struct MSG { public IntPtr h; public uint m; public IntPtr w, l; public uint t; public int x, y; }
         [DllImport("user32.dll")] static extern int GetMessage(out MSG m, IntPtr h, uint a, uint b);
-        public static bool Keys = true, Halo = true;   // что ловить: сочетания и щелчки / подсветка курсора
-        public static readonly List<Ev> Moves = new List<Ev>();   // положение курсора для подсветки (не чаще 15 раз в секунду)
+
+        // ---- настройки (ini программы, окно «Мышь и клавиатура») ----
+        public static bool Keys = true, Clicks = true, Halo = true, KeyAll = false, Cursor = true;
+        public static int HaloSize = 100, HaloOp = 55, ClickSize = 100, KeyPos = 6, KeySize = 1;   // KeyPos: 0..8 слева направо, сверху вниз (6 — левый нижний)
+        public static Color HaloColor = Color.FromArgb(255, 235, 59), ClickL = Color.FromArgb(255, 45, 45), ClickR = Color.FromArgb(40, 120, 255);
+        public static string ColStr(Color c) { return c.R + "," + c.G + "," + c.B; }
+        public static Color ColParse(string s, Color def)
+        {
+            try { var p = s.Split(','); if (p.Length == 3) return Color.FromArgb(int.Parse(p[0]), int.Parse(p[1]), int.Parse(p[2])); } catch { }
+            return def;
+        }
+        static int Int(Settings c, string k, int def, int lo, int hi) { int v; if (!int.TryParse(c.Get(k, ""), out v)) v = def; return Math.Max(lo, Math.Min(hi, v)); }
+        public static void LoadCfg(Settings c)
+        {
+            Keys = c.Get("keys", "1") == "1"; Halo = c.Get("halo", "1") == "1";
+            Clicks = c.Get("mk_clicks", Keys ? "1" : "0") == "1"; Cursor = c.Get("mk_cursor", "1") == "1";
+            KeyAll = c.Get("mk_keyall", "0") == "1";
+            HaloSize = Int(c, "mk_halo_size", 100, 30, 300); HaloOp = Int(c, "mk_halo_op", 55, 5, 100);
+            ClickSize = Int(c, "mk_click_size", 100, 30, 300); KeyPos = Int(c, "mk_key_pos", 6, 0, 8); KeySize = Int(c, "mk_key_size", 1, 0, 2);
+            HaloColor = ColParse(c.Get("mk_halo_color", ""), Color.FromArgb(255, 235, 59));
+            ClickL = ColParse(c.Get("mk_click_l", ""), Color.FromArgb(255, 45, 45)); ClickR = ColParse(c.Get("mk_click_r", ""), Color.FromArgb(40, 120, 255));
+        }
+        public static void SaveCfg(Settings c)
+        {
+            c.Set("keys", Keys ? "1" : "0"); c.Set("halo", Halo ? "1" : "0"); c.Set("mk_clicks", Clicks ? "1" : "0"); c.Set("mk_cursor", Cursor ? "1" : "0");
+            c.Set("mk_keyall", KeyAll ? "1" : "0"); c.Set("mk_halo_size", HaloSize.ToString()); c.Set("mk_halo_op", HaloOp.ToString());
+            c.Set("mk_click_size", ClickSize.ToString()); c.Set("mk_key_pos", KeyPos.ToString()); c.Set("mk_key_size", KeySize.ToString());
+            c.Set("mk_halo_color", ColStr(HaloColor)); c.Set("mk_click_l", ColStr(ClickL)); c.Set("mk_click_r", ColStr(ClickR));
+            c.Save();
+        }
+
+        public static readonly List<Ev> Moves = new List<Ev>();   // положение курсора для подсветки (v19.12: до ~120 раз в секунду, дальше — интерполяция по кадрам)
         static double lastMove = -1;
+        static string typBuf = ""; static double typLast = -10;
         static IntPtr hk = IntPtr.Zero, hm = IntPtr.Zero;
         delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
         static HookProc kp = KbProc, mp = MsProc;   // держим ссылки — иначе сборщик мусора уберёт делегаты
@@ -2921,15 +2973,15 @@ namespace XyzRecorder
         [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string n);
         public static void Start()
         {
-            lock (Events) Events.Clear(); lock (Moves) Moves.Clear(); lastMove = -1;
+            lock (Events) Events.Clear(); lock (Moves) Moves.Clear(); lock (SegClk) SegClk.Clear(); SegDur = null; lastMove = -1; typBuf = ""; typLast = -10;
             accT = 0; clk.Reset(); Resume();
             if (hookThread != null) return;
             var ready = new ManualResetEvent(false);
             hookThread = new Thread(() =>
             {
                 hookTid = GetCurrentThreadId();
-                hk = SetWindowsHookEx(13, kp, GetModuleHandle(null), 0);
-                if (Halo || Keys) hm = SetWindowsHookEx(14, mp, GetModuleHandle(null), 0);
+                if (Keys) hk = SetWindowsHookEx(13, kp, GetModuleHandle(null), 0);
+                if (Halo || Clicks) hm = SetWindowsHookEx(14, mp, GetModuleHandle(null), 0);
                 ready.Set();
                 MSG m; while (GetMessage(out m, IntPtr.Zero, 0, 0) > 0) { }
                 if (hk != IntPtr.Zero) { UnhookWindowsHookEx(hk); hk = IntPtr.Zero; }
@@ -2948,15 +3000,19 @@ namespace XyzRecorder
         {
             if (vk >= 0x41 && vk <= 0x5A) return ((char)vk).ToString();
             if (vk >= 0x30 && vk <= 0x39) return ((char)vk).ToString();
+            if (vk >= 0x60 && vk <= 0x69) return ((char)('0' + vk - 0x60)).ToString();   // цифры с Num
             if (vk >= 0x70 && vk <= 0x87) return "F" + (vk - 0x6F);
             switch (vk)
             {
-                case 0x1B: return "Esc"; case 0x09: return "Tab"; case 0x0D: return "Enter"; case 0x2E: return "Del"; case 0x08: return "Backspace";
-                case 0x20: return "Пробел"; case 0x25: return "←"; case 0x26: return "↑"; case 0x27: return "→"; case 0x28: return "↓";
-                case 0x24: return "Home"; case 0x23: return "End"; case 0x21: return "PgUp"; case 0x22: return "PgDn"; case 0x2D: return "Ins";
+                case 0x1B: return "Esc"; case 0x09: return "Tab"; case 0x0D: return "Enter"; case 0x2E: return "Delete"; case 0x08: return "Back Space";
+                case 0x20: return "Space"; case 0x25: return "←"; case 0x26: return "↑"; case 0x27: return "→"; case 0x28: return "↓";
+                case 0x24: return "Home"; case 0x23: return "End"; case 0x21: return "PgUp"; case 0x22: return "PgDn"; case 0x2D: return "Insert";
+                case 0x6A: return "*"; case 0x6B: return "+"; case 0x6D: return "-"; case 0x6E: return "."; case 0x6F: return "/";
+                case 0x14: return "Caps Lock"; case 0x2C: return "Print Screen"; case 0x13: return "Pause"; case 0x5D: return "Menu";
             }
             var sb = new StringBuilder(32); GetKeyNameText(scan << 16, sb, 32); return sb.Length > 0 ? sb.ToString() : "#" + vk;
         }
+        static void AddKey(Ev e) { lock (Events) Events.Add(e); }
         static IntPtr KbProc(int code, IntPtr w, IntPtr l)
         {
             try
@@ -2970,11 +3026,26 @@ namespace XyzRecorder
                     {
                         bool c = Down(0x11), a = Down(0x12), wn = Down(0x5B) || Down(0x5C), sh = Down(0x10);
                         bool special = vk == 0x1B || vk == 0x09 || vk == 0x0D || vk == 0x2E || vk == 0x08 || (vk >= 0x70 && vk <= 0x7B);
+                        double now = Clock();
                         if (c || a || wn || special)
                         {
                             string t = (c ? "Ctrl + " : "") + (a ? "Alt + " : "") + (wn ? "Win + " : "") + (sh ? "Shift + " : "") + Name(vk, scan);
-                            double now = Clock();
-                            lock (Events) Events.Add(new Ev { T = now, Text = t, Kind = 0 });
+                            typBuf = ""; AddKey(new Ev { T = now, Text = t, Kind = 0 });
+                        }
+                        else if (KeyAll)
+                        {
+                            // v19.12: «все нажатия» — буквы, цифры, знаки и пробел склеиваются в строку («FGDGG»), остальное — словом
+                            string n = Name(vk, scan);
+                            bool glyph = vk == 0x20 || n.Length == 1;
+                            if (glyph)
+                            {
+                                string ch = vk == 0x20 ? " " : n.ToUpperInvariant();
+                                typBuf = (now - typLast < 1.6 && typBuf.Length > 0 ? typBuf : "") + ch;
+                                if (typBuf.Length > 28) typBuf = typBuf.Substring(typBuf.Length - 28);
+                                typLast = now;
+                                AddKey(new Ev { T = now, Text = typBuf.Trim().Length == 0 ? "Space" : typBuf, Kind = 0, Typ = true });
+                            }
+                            else { typBuf = ""; AddKey(new Ev { T = now, Text = (sh ? "Shift + " : "") + n, Kind = 0 }); }
                         }
                     }
                 }
@@ -2990,9 +3061,9 @@ namespace XyzRecorder
                 if (code >= 0 && Halo && active && msg == 0x200)
                 {
                     double now = Clock();
-                    if (now - lastMove >= 0.033) { lastMove = now; lock (Moves) Moves.Add(new Ev { T = now, X = Marshal.ReadInt32(l), Y = Marshal.ReadInt32(l, 4) }); }
+                    if (now - lastMove >= 0.008) { lastMove = now; lock (Moves) Moves.Add(new Ev { T = now, X = Marshal.ReadInt32(l), Y = Marshal.ReadInt32(l, 4) }); }
                 }
-                if (code >= 0 && Keys && active && (msg == 0x201 || msg == 0x204 || msg == 0x207))
+                if (code >= 0 && Clicks && active && (msg == 0x201 || msg == 0x204 || msg == 0x207))
                 {
                     int x = Marshal.ReadInt32(l), y = Marshal.ReadInt32(l, 4);
                     double now = Clock();
@@ -3002,114 +3073,453 @@ namespace XyzRecorder
             catch { }
             return CallNextHookEx(hm, code, w, l);
         }
-        static string Esc(string p) { return p.Replace("\\", "/").Replace(":", "\\:").Replace("'", "\\'"); }
-        static string Png(string dir, string name, Bitmap b) { string f = Path.Combine(dir, name); b.Save(f, ImageFormat.Png); b.Dispose(); return f; }
-        static Bitmap Label(string text, int fs)
+
+        // ---- картинки (общие для ролика и предпросмотра в окне настроек) ----
+        // мягкое пятно: ярко в центре, к краю плавно в прозрачность (smoothstep), без контура
+        public static Bitmap HaloBmp(int d, Color c, float op)
         {
-            using (var font = new Font("Segoe UI", fs, FontStyle.Bold, GraphicsUnit.Pixel))
+            d = Math.Max(8, d); var bm = new Bitmap(d, d, PixelFormat.Format32bppArgb);
+            var px = new int[d * d]; float R = d / 2f;
+            for (int y = 0; y < d; y++) for (int x = 0; x < d; x++)
             {
-                Size sz; using (var tmp = new Bitmap(1, 1)) using (var g0 = Graphics.FromImage(tmp)) sz = Size.Ceiling(g0.MeasureString(text, font));
-                int pad = fs / 2, w = sz.Width + pad * 2, h = sz.Height + pad;
-                var bm = new Bitmap(w, h, PixelFormat.Format32bppArgb);
-                using (var g = Graphics.FromImage(bm))
-                {
-                    g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-                    using (var gp = new GraphicsPath()) { int r = h / 3; gp.AddArc(0, 0, r * 2, r * 2, 180, 90); gp.AddArc(w - 1 - r * 2, 0, r * 2, r * 2, 270, 90); gp.AddArc(w - 1 - r * 2, h - 1 - r * 2, r * 2, r * 2, 0, 90); gp.AddArc(0, h - 1 - r * 2, r * 2, r * 2, 90, 90); gp.CloseFigure();
-                        using (var br = new SolidBrush(Color.FromArgb(205, 20, 24, 28))) g.FillPath(br, gp);
-                        using (var pn = new Pen(Color.FromArgb(200, 120, 220, 200), Math.Max(2, fs / 14))) g.DrawPath(pn, gp); }
-                    using (var br = new SolidBrush(Color.White)) g.DrawString(text, font, br, pad, pad / 2);
-                }
-                return bm;
+                float dx = (x + 0.5f - R) / R, dy = (y + 0.5f - R) / R, r2 = dx * dx + dy * dy;
+                if (r2 >= 1f) continue;
+                float r = (float)Math.Sqrt(r2), u = Math.Max(0f, Math.Min(1f, (r - 0.15f) / 0.85f)), k = 1f - u * u * (3f - 2f * u);   // плато в центре, плавный спад к краю
+                int a = (int)Math.Round(255 * op * k); if (a <= 0) continue;
+                px[y * d + x] = (a << 24) | (c.R << 16) | (c.G << 8) | c.B;
             }
-        }
-        static Bitmap Disc(int d, Color c, bool fill)
-        {
-            var bm = new Bitmap(d, d, PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(bm))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias; float t = Math.Max(3, d / 10f);
-                if (fill) using (var br = new SolidBrush(c)) g.FillEllipse(br, 1, 1, d - 3, d - 3);
-                else using (var pn = new Pen(c, t)) g.DrawEllipse(pn, t / 2 + 1, t / 2 + 1, d - t - 3, d - t - 3);
-            }
+            var bd = bm.LockBits(new Rectangle(0, 0, d, d), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            Marshal.Copy(px, 0, bd.Scan0, px.Length); bm.UnlockBits(bd);
             return bm;
         }
-        // Наложить нажатия на готовый ролик (в ffmpeg программы нет drawtext — таблички и круги рисуем PNG и накладываем overlay,
-        // положение кругов меняет sendcmd). cap — область захвата (экранные координаты) для пересчёта точек.
+        // вспышка щелчка: светящееся мягкое кольцо + лёгкая заливка в центре (курсор под ней остаётся виден)
+        public static Bitmap ClickBmp(int d, Color c, float op)
+        {
+            d = Math.Max(8, d); var bm = new Bitmap(d, d, PixelFormat.Format32bppArgb);
+            var px = new int[d * d]; float R = d / 2f;
+            for (int y = 0; y < d; y++) for (int x = 0; x < d; x++)
+            {
+                float dx = (x + 0.5f - R) / R, dy = (y + 0.5f - R) / R, r = (float)Math.Sqrt(dx * dx + dy * dy);
+                if (r >= 1f) continue;
+                float ring = (float)Math.Exp(-Math.Pow((r - 0.62f) / 0.2f, 2)), fill = 0.28f * (1f - r);
+                float k = Math.Min(1f, ring * 0.95f + fill); if (r > 0.85f) k *= (1f - r) / 0.15f;
+                int a = (int)Math.Round(255 * op * k); if (a <= 0) continue;
+                px[y * d + x] = (a << 24) | (c.R << 16) | (c.G << 8) | c.B;
+            }
+            var bd = bm.LockBits(new Rectangle(0, 0, d, d), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            Marshal.Copy(px, 0, bd.Scan0, px.Length); bm.UnlockBits(bd);
+            return bm;
+        }
+        public static int HaloD(int H) { return Math.Max(48, H / 12); }   // 100 %: 120 px при 1440
+        public static int ClickD(int H) { return Math.Max(48, H / 11); }
+        public static float KeyFs(int H) { return Math.Max(KeySize == 0 ? 20 : KeySize == 1 ? 28 : 38, H / (KeySize == 0 ? 28f : KeySize == 1 ? 20f : 14f)); }
+        // текст клавиш как у Bandicam: белый жирный, тёмная обводка и мягкая тень, без плашки
+        public static void DrawKeyText(Graphics g, string text, float fs, float x, float y)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var fam = new FontFamily("Segoe UI"))
+            using (var gp = new GraphicsPath())
+            {
+                gp.AddString(text, fam, (int)FontStyle.Bold, fs, new PointF(x, y), StringFormat.GenericTypographic);
+                for (int i = 4; i >= 1; i--)
+                    using (var pen = new Pen(Color.FromArgb(28, 0, 0, 0), fs * (0.10f + 0.07f * i)) { LineJoin = LineJoin.Round })
+                    { var m = new Matrix(); m.Translate(fs * 0.04f, fs * 0.06f); using (var sh = (GraphicsPath)gp.Clone()) { sh.Transform(m); g.DrawPath(pen, sh); } }
+                using (var pen = new Pen(Color.FromArgb(235, 16, 18, 22), Math.Max(2f, fs * 0.13f)) { LineJoin = LineJoin.Round }) g.DrawPath(pen, gp);
+                using (var br = new SolidBrush(Color.White)) g.FillPath(br, gp);
+            }
+        }
+        public static SizeF KeyTextSize(string text, float fs)
+        {
+            using (var fam = new FontFamily("Segoe UI")) using (var gp = new GraphicsPath())
+            {
+                gp.AddString(text, fam, (int)FontStyle.Bold, fs, new PointF(0, 0), StringFormat.GenericTypographic);
+                var b = gp.GetBounds(); return new SizeF(Math.Max(1, b.Right), Math.Max(1, b.Bottom));
+            }
+        }
+
+        static string Esc(string p) { return p.Replace("\\", "/").Replace(":", "\\:").Replace("'", "\\'"); }
+        static string Png(string dir, string name, Bitmap b) { string f = Path.Combine(dir, name); b.Save(f, ImageFormat.Png); b.Dispose(); return f; }
+
+        // свойства ролика по выводу ffmpeg -i: длительность, кадров/с, размер
+        public static void Probe(string ff, string f, out double dur, out double fps, out int w, out int h)
+        {
+            dur = 0; fps = 0; w = 0; h = 0;
+            try
+            {
+                var psi = new ProcessStartInfo(ff, "-hide_banner -i \"" + f + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, StandardErrorEncoding = Encoding.UTF8 };
+                string err; using (var p = Process.Start(psi)) { err = p.StandardError.ReadToEnd(); p.WaitForExit(5000); }
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                var m = System.Text.RegularExpressions.Regex.Match(err, @"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)");
+                if (m.Success) dur = int.Parse(m.Groups[1].Value) * 3600 + int.Parse(m.Groups[2].Value) * 60 + double.Parse(m.Groups[3].Value, inv);
+                var mv = System.Text.RegularExpressions.Regex.Match(err, @"Video:[^\r\n]*?(\d{2,5})x(\d{2,5})[^\r\n]*?(\d+(?:\.\d+)?) (?:fps|tbr)");
+                if (mv.Success) { w = int.Parse(mv.Groups[1].Value); h = int.Parse(mv.Groups[2].Value); fps = double.Parse(mv.Groups[3].Value, inv); }
+            }
+            catch { }
+        }
+
+        // время секундомера → время ролика. По каждому сегменту: задержка старта d = (длина по секундомеру) − (длина файла),
+        // события сдвигаются на d назад (не в минус); сегменты склеены встык. Нет данных по сегментам — общая поправка.
+        static Func<double, double> Mapper(double outDur, Action<string> log)
+        {
+            List<double[]> sc; lock (SegClk) sc = new List<double[]>(SegClk);
+            var sd = SegDur;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (sd != null && sd.Count == sc.Count && sc.Count > 0 && !sd.Contains(0))
+            {
+                var vs = new double[sc.Count]; var dd = new double[sc.Count]; double acc = 0; var sb = new StringBuilder("сдвиг по сегментам:");
+                for (int i = 0; i < sc.Count; i++) { vs[i] = acc; acc += sd[i]; dd[i] = Math.Max(-2, Math.Min(3, (sc[i][1] - sc[i][0]) - sd[i])); sb.AppendFormat(inv, " {0:0.000}", dd[i]); }
+                if (log != null) log("=== нажатия/курсор: " + sb);
+                return t =>
+                {
+                    int i = sc.Count - 1; for (int j = 0; j < sc.Count; j++) if (t < sc[j][1]) { i = j; break; }
+                    return vs[i] + Math.Max(0, Math.Min(sd[i], t - sc[i][0] - dd[i]));
+                };
+            }
+            double total = sc.Count > 0 ? sc[sc.Count - 1][1] : 0, d = 0;
+            if (total > 0 && outDur > 0) d = Math.Max(-2, Math.Min(3, total - outDur));
+            if (log != null) log(string.Format(inv, "=== нажатия/курсор: общий сдвиг {0:0.000} с (секундомер {1:0.000}, ролик {2:0.000})", d, total, outDur));
+            return t => Math.Max(0, t - d);
+        }
+
+        // Наложить нажатия на готовый ролик (в ffmpeg программы нет drawtext — картинки PNG и overlay; положение подсветки и вспышек меняет sendcmd,
+        // надписи клавиш — отдельный поток картинок по списку ffconcat). cap — область захвата (экранные координаты) для пересчёта точек.
         public static bool Burn(string ff, string inFile, string outFile, Rectangle cap, string work, Action<string> log, out string err)
         {
-            err = null; List<Ev> ev; lock (Events) ev = new List<Ev>(Events); List<Ev> mv; lock (Moves) mv = new List<Ev>(Moves);
+            err = null; var ev = new List<Ev>(); var mv = new List<Ev>();
+            lock (Events) foreach (var e in Events) ev.Add(new Ev { T = e.T, Text = e.Text, X = e.X, Y = e.Y, Kind = e.Kind, Typ = e.Typ });
+            lock (Moves) foreach (var e in Moves) mv.Add(new Ev { T = e.T, X = e.X, Y = e.Y });
             if (ev.Count == 0 && mv.Count == 0) { err = "нет событий"; return false; }
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             string dir = Path.Combine(work, "keys"); Directory.CreateDirectory(dir);
-            int H = Math.Max(240, cap.Height), fs = Math.Max(24, H / 24), rd = Math.Max(40, H / 14), hd = Math.Max(36, H / 18);
+            double dur, fps; int VW, VH; Probe(ff, inFile, out dur, out fps, out VW, out VH);
+            if (fps <= 1 || fps > 240) fps = 15; if (VW <= 0) { VW = cap.Width / 2 * 2; VH = cap.Height / 2 * 2; }
+            if (dur <= 0) { var l0 = mv.Count > 0 ? mv[mv.Count - 1].T : 0; foreach (var e in ev) l0 = Math.Max(l0, e.T); dur = l0 + 2; }
+            var map = Mapper(dur, log);
+            foreach (var e in ev) e.T = map(e.T); foreach (var m in mv) m.T = map(m.T);
+            ev.Sort((a, b) => a.T.CompareTo(b.T)); mv.Sort((a, b) => a.T.CompareTo(b.T));
+
+            int H = Math.Max(240, cap.Height);
+            int hd = Math.Max(24, (int)(HaloD(H) * HaloSize / 100.0)) / 2 * 2, rd = Math.Max(24, (int)(ClickD(H) * ClickSize / 100.0)) / 2 * 2;
             var cmds = new List<KeyValuePair<double, string>>();
             var g = new StringBuilder(); g.Append("[0:v]sendcmd=f='").Append(Esc(Path.Combine(dir, "cmd.txt"))).Append("'[v0];\n");
             int vi = 0, n = 0;
             Action<string, string> ov = (png, opts) => { g.AppendFormat("movie='{0}'[m{1}];\n[v{1}][m{1}]overlay{2}[v{3}];\n", Esc(png), vi, opts, vi + 1); vi++; };
-            if (mv.Count > 0)
+            double half = 0.5 / fps;
+            if (Halo && mv.Count > 0)
             {
-                ov(Png(dir, "halo.png", Disc(hd, Color.FromArgb(85, 255, 235, 59), true)), "@halo=x=-2000:y=-2000:eof_action=repeat");
-                foreach (var m in mv) cmds.Add(new KeyValuePair<double, string>(m.T, string.Format(inv, "overlay@halo x {0}, overlay@halo y {1};", m.X - cap.X - hd / 2, m.Y - cap.Y - hd / 2)));
+                ov(Png(dir, "halo.png", HaloBmp(hd, HaloColor, HaloOp / 100f)), "@halo=x=-4000:y=-4000:eof_action=repeat");
+                // v19.12: положение на каждый кадр ролика, линейно между точками хука (паузу мыши не «размазываем»)
+                int lx = int.MinValue, ly = int.MinValue, j = 0, N = (int)Math.Ceiling(dur * fps) + 1;
+                for (int k = 0; k < N; k++)
+                {
+                    double t = k / fps; if (t < mv[0].T - half) continue;
+                    while (j + 1 < mv.Count && mv[j + 1].T <= t) j++;
+                    double x = mv[j].X, y = mv[j].Y;
+                    if (j + 1 < mv.Count && mv[j].T <= t)
+                    {
+                        double gap = mv[j + 1].T - mv[j].T;
+                        if (gap > 0 && gap <= 0.12) { double u = (t - mv[j].T) / gap; x += (mv[j + 1].X - x) * u; y += (mv[j + 1].Y - y) * u; }
+                    }
+                    int ix = (int)Math.Round(x) - cap.X - hd / 2, iy = (int)Math.Round(y) - cap.Y - hd / 2;
+                    if (ix == lx && iy == ly) continue; lx = ix; ly = iy;
+                    cmds.Add(new KeyValuePair<double, string>(Math.Max(0, t - half), string.Format(inv, "overlay@halo x {0}, overlay@halo y {1};", ix, iy)));
+                }
                 n++;
             }
-            var cols = new[] { Color.Empty, Color.FromArgb(235, 255, 213, 79), Color.FromArgb(235, 255, 82, 82), Color.FromArgb(235, 100, 181, 246) };
+            // вспышки щелчков: 3 ступени (растёт и гаснет), левая — красная, правая — синяя, средняя — как левая, но светлее
+            var cols = new[] { Color.Empty, ClickL, ClickR, Theme.Mix(ClickL, Color.White, 0.45f) };
+            var st = new[] { new[] { 0.0, 0.10, 0.72, 1.0 }, new[] { 0.10, 0.22, 0.88, 0.8 }, new[] { 0.22, 0.38, 1.0, 0.5 } };   // начало, конец, размер, яркость
             for (int k = 1; k <= 3; k++)
             {
                 var cl = ev.FindAll(e => e.Kind == k); if (cl.Count == 0) continue;
-                ov(Png(dir, "ring" + k + ".png", Disc(rd, cols[k], false)), "@r" + k + "=x=-2000:y=-2000:eof_action=repeat");
-                foreach (var e in cl)
+                for (int s = 0; s < st.Length; s++)
                 {
-                    cmds.Add(new KeyValuePair<double, string>(e.T, string.Format(inv, "overlay@r{0} x {1}, overlay@r{0} y {2};", k, e.X - cap.X - rd / 2, e.Y - cap.Y - rd / 2)));
-                    cmds.Add(new KeyValuePair<double, string>(e.T + 0.45, string.Format(inv, "overlay@r{0} x -2000;", k)));
-                    n++;
+                    int ds = Math.Max(8, (int)(rd * st[s][2])) / 2 * 2; string nm = "c" + k + s;
+                    ov(Png(dir, nm + ".png", ClickBmp(ds, cols[k], (float)st[s][3])), "@" + nm + "=x=-4000:y=-4000:eof_action=repeat");
+                    foreach (var e in cl)
+                    {
+                        cmds.Add(new KeyValuePair<double, string>(e.T + st[s][0], string.Format(inv, "overlay@{0} x {1}, overlay@{0} y {2};", nm, e.X - cap.X - ds / 2, e.Y - cap.Y - ds / 2)));
+                        cmds.Add(new KeyValuePair<double, string>(e.T + st[s][1], string.Format(inv, "overlay@{0} x -4000;", nm)));
+                    }
                 }
+                n += cl.Count;
             }
+            // клавиши: каждая надпись — PNG во всю ширину кадра (выравнивание по позиции внутри), поток картинок по списку ffconcat
             var keys = ev.FindAll(e => e.Kind == 0);
-            var byText = new Dictionary<string, List<double[]>>();
-            for (int i = 0; i < keys.Count; i++)
+            string kin = null; float fs = KeyFs(VH); int lh = (int)Math.Ceiling(fs * 1.9f) / 2 * 2, row = KeyPos / 3, col = KeyPos % 3;
+            if (keys.Count > 0)
             {
-                var e = keys[i]; double t1 = e.T + 1.5; if (i + 1 < keys.Count) t1 = Math.Min(t1, keys[i + 1].T); if (t1 < e.T + 0.25) t1 = e.T + 0.25;
-                List<double[]> l; if (!byText.TryGetValue(e.Text, out l)) byText[e.Text] = l = new List<double[]>(); l.Add(new[] { e.T, t1 });
-            }
-            int li = 0;
-            foreach (var kv in byText)
-            {
-                var en = new StringBuilder(); foreach (var iv in kv.Value) { if (en.Length > 0) en.Append('+'); en.AppendFormat(inv, "between(t,{0:0.###},{1:0.###})", iv[0], iv[1]); }
-                ov(Png(dir, "k" + (li++) + ".png", Label(kv.Key, fs)), string.Format(inv, "=x=(W-w)/2:y=H-h-{0}:eof_action=repeat:enable='{1}'", fs, en));
-                n += kv.Value.Count;
+                var pngs = new Dictionary<string, string>();
+                Func<string, string> label = text =>
+                {
+                    string f; if (pngs.TryGetValue(text, out f)) return f;
+                    f = "k" + pngs.Count + ".png";
+                    using (var bm = new Bitmap(VW, lh, PixelFormat.Format32bppArgb))
+                    {
+                        using (var gg = Graphics.FromImage(bm))
+                        {
+                            var sz = KeyTextSize(text, fs); float m = fs * 0.7f;
+                            float x = col == 0 ? m : col == 1 ? (VW - sz.Width) / 2 : VW - m - sz.Width;
+                            DrawKeyText(gg, text, fs, Math.Max(2, x), (lh - sz.Height) / 2f);
+                        }
+                        bm.Save(Path.Combine(dir, f), ImageFormat.Png);
+                    }
+                    pngs[text] = f; return f;
+                };
+                using (var bm = new Bitmap(VW, lh, PixelFormat.Format32bppArgb)) bm.Save(Path.Combine(dir, "blank.png"), ImageFormat.Png);
+                var cc = new StringBuilder("ffconcat version 1.0\n"); double cur = 0;
+                for (int i = 0; i < keys.Count; i++)
+                {
+                    var e = keys[i]; double t0 = Math.Max(cur, e.T), t1 = e.T + 1.8; if (i + 1 < keys.Count) t1 = Math.Min(t1, keys[i + 1].T); if (t1 < t0 + 1.0 / fps) t1 = t0 + 1.0 / fps;   // надпись — до следующей, но не меньше кадра
+                    if (t0 > cur + 0.001) cc.AppendFormat(inv, "file blank.png\nduration {0:0.######}\n", t0 - cur);
+                    cc.AppendFormat(inv, "file {0}\nduration {1:0.######}\n", label(e.Text), t1 - t0); cur = t1; n++;
+                }
+                cc.Append("file blank.png\nduration 1\nfile blank.png\n");
+                kin = Path.Combine(dir, "keys.ffconcat"); File.WriteAllText(kin, cc.ToString(), new UTF8Encoding(false));
+                float mY = fs * 0.35f; int ky = row == 0 ? (int)mY : row == 1 ? (VH - lh) / 2 : VH - lh - (int)mY;
+                g.AppendFormat("[1:v]format=rgba[kk];\n[v{0}][kk]overlay=x=0:y={1}:eof_action=repeat[v{2}];\n", vi, ky, vi + 1); vi++;
             }
             if (n == 0) { err = "нет событий в кадре"; return false; }
             cmds.Sort((x, y) => x.Key.CompareTo(y.Key));
-            var cs = new StringBuilder(); foreach (var c in cmds) cs.AppendFormat(inv, "{0:0.###} {1}\n", c.Key, c.Value);
+            var cs = new StringBuilder(); foreach (var c in cmds) cs.AppendFormat(inv, "{0:0.####} {1}\n", c.Key, c.Value);
             if (cs.Length == 0) cs.Append("0 overlay@none x 0;\n");
             File.WriteAllText(Path.Combine(dir, "cmd.txt"), cs.ToString(), new UTF8Encoding(false));
             string gs = g.ToString(); gs = gs.Substring(0, gs.LastIndexOf("[v" + vi + "];")) + "[vout]";
             string script = Path.Combine(dir, "graph.txt"); File.WriteAllText(script, gs, new UTF8Encoding(false));
-            string args = "-hide_banner -y -i \"" + inFile + "\" -filter_complex_script \"" + script + "\" -map \"[vout]\" -map 0:a? -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -c:a copy -movflags +faststart \"" + outFile + "\"";
+            string args = "-hide_banner -y -i \"" + inFile + "\" " + (kin != null ? "-f concat -safe 0 -i \"" + kin + "\" " : "") + "-filter_complex_script \"" + script + "\" -map \"[vout]\" -map 0:a? -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -c:a copy -movflags +faststart \"" + outFile + "\"";
             try
             {
                 var psi = new ProcessStartInfo(ff, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
                 string tail;
                 using (var p = Process.Start(psi)) { tail = p.StandardError.ReadToEnd(); p.WaitForExit(); if (p.ExitCode != 0 || !File.Exists(outFile)) { err = tail.Length > 800 ? tail.Substring(tail.Length - 800) : tail; return false; } }
-                if (log != null) log("=== нажатия/курсор: " + n + " меток наложено");
+                if (log != null) log("=== нажатия/курсор: " + n + " меток наложено, кадр " + VW + "x" + VH + " " + fps.ToString("0.##", inv) + " к/с, точек курсора " + mv.Count);
                 return true;
             }
             catch (Exception ex) { err = ex.Message; return false; }
         }
-        // проверка без записи: --keystest <mp4> — придуманные события на первые 3 с
-        public static int SelfTest(string mp4)
+        // проверка без записи: --keystest <mp4> [all] — придуманные события на первые 3 с (секундомер «опережает» ролик на 0,3 с)
+        public static int SelfTest(string mp4, bool all)
         {
             string ff = Engine.FindFfmpeg(); var cap = new Rectangle(0, 0, 2560, 1440);
-            lock (Events) { Events.Clear(); Events.Add(new Ev { T = 0.5, Text = "Ctrl + Z", Kind = 0 }); Events.Add(new Ev { T = 1.2, Text = "Esc", Kind = 0 }); Events.Add(new Ev { T = 1.0, X = 800, Y = 500, Kind = 1 }); Events.Add(new Ev { T = 1.8, X = 1200, Y = 700, Kind = 2 }); }
-            lock (Moves) { Moves.Clear(); for (int i = 0; i < 40; i++) Moves.Add(new Ev { T = i * 0.066, X = 600 + i * 20, Y = 400 + i * 8 }); }
+            try { LoadCfg(Settings.Load()); } catch { }
+            Keys = Clicks = Halo = true; KeyAll = all;
             string work = Path.Combine(Path.GetTempPath(), "xyz_keystest"); Directory.CreateDirectory(work);
-            string cut = Path.Combine(work, "in.mp4"), outF = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", "keystest.mp4");
+            string cut = Path.Combine(work, "in.mp4"), outF = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", all ? "keystest_all.mp4" : "keystest.mp4");
             Directory.CreateDirectory(Path.GetDirectoryName(outF));
-            using (var p = Process.Start(new ProcessStartInfo(ff, "-hide_banner -y -t 3 -i \"" + mp4 + "\" -c copy \"" + cut + "\"") { UseShellExecute = false, CreateNoWindow = true })) p.WaitForExit(30000);
-            string err; bool ok = Burn(ff, cut, outF, cap, work, null, out err);
-            File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", "keystest.log"), (ok ? "ok" : "ERR " + err) + "\r\n" + File.ReadAllText(Path.Combine(work, "keys", "graph.txt")));
+            using (var p = Process.Start(new ProcessStartInfo(ff, "-hide_banner -y -t 3 -i \"" + mp4 + "\" -an -vf scale=2560:1440,fps=15 -c:v libx264 -preset ultrafast -crf 30 \"" + cut + "\"") { UseShellExecute = false, CreateNoWindow = true })) p.WaitForExit(30000);
+            const double D = 0.3;   // как будто ffmpeg начал писать кадры на 0,3 с позже секундомера
+            lock (SegClk) { SegClk.Clear(); SegClk.Add(new[] { 0.0, 3.0 + D }); }
+            double dur, fps; int w, h; Probe(ff, cut, out dur, out fps, out w, out h); SegDur = new List<double> { dur };
+            lock (Events)
+            {
+                Events.Clear();
+                Events.Add(new Ev { T = 0.5 + D, Text = "Ctrl + Z", Kind = 0 }); Events.Add(new Ev { T = 1.3 + D, X = 800, Y = 500, Kind = 1 }); Events.Add(new Ev { T = 2.1 + D, X = 1500, Y = 760, Kind = 2 });
+                if (all) { string s = ""; foreach (var ch in "FGDGG") { s += ch; Events.Add(new Ev { T = 1.4 + D + s.Length * 0.12, Text = s, Kind = 0, Typ = true }); } Events.Add(new Ev { T = 2.3 + D, Text = "Back Space", Kind = 0 }); }
+                else Events.Add(new Ev { T = 1.6 + D, Text = "Esc", Kind = 0 });
+            }
+            lock (Moves) { Moves.Clear(); for (int i = 0; i <= 90; i++) { double t = i / 30.0; Moves.Add(new Ev { T = t + D, X = 500 + (int)(t / 1.3 * 300), Y = 380 + (int)(t / 1.3 * 120) }); } }   // в 1,3 с курсор в (800,500)
+            var log = new StringBuilder();
+            string err; bool ok = Burn(ff, cut, outF, cap, work, x => log.AppendLine(x), out err);
+            File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", all ? "keystest_all.log" : "keystest.log"), (ok ? "ok" : "ERR " + err) + "\r\n" + log + "\r\n" + File.ReadAllText(Path.Combine(work, "keys", "graph.txt")));
             return ok ? 0 : 1;
         }
+    }
+
+    // v19.12: окно «Мышь и клавиатура» в стиле прибора — свои переключатели, кружки цвета, сетка позиции 3×3 и живой предпросмотр
+    class MkCheck : Control
+    {
+        public bool Checked; public event EventHandler Changed; bool hot;
+        public MkCheck(string t, bool on) { Text = t; Checked = on; Cursor = Cursors.Hand; SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true); BackColor = Color.Transparent; Font = Theme.Px(Theme.UiFam, 13f, FontStyle.Regular); Size = new Size(TextRenderer.MeasureText(t, Font).Width + 30, 24); }
+        protected override void OnMouseEnter(EventArgs e) { hot = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hot = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnClick(EventArgs e) { Checked = !Checked; Invalidate(); if (Changed != null) Changed(this, e); base.OnClick(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            var r = new RectangleF(2, (Height - 16) / 2f, 16, 16);
+            using (var p = Theme.Round(r, 4))
+            {
+                if (Checked) { using (var b = new SolidBrush(Theme.Teal)) g.FillPath(b, p); using (var pen = new Pen(Color.FromArgb(12, 14, 17), 2f) { LineJoin = LineJoin.Round }) g.DrawLines(pen, new[] { new PointF(r.X + 3.5f, r.Y + 8.5f), new PointF(r.X + 6.8f, r.Y + 11.5f), new PointF(r.X + 12.5f, r.Y + 4.5f) }); }
+                else { using (var b = new SolidBrush(Color.FromArgb(10, 13, 16))) g.FillPath(b, p); using (var pen = new Pen(hot ? Theme.Teal : Color.FromArgb(70, 255, 255, 255), 1.2f)) g.DrawPath(pen, p); }
+            }
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(24, 0, Width - 24, Height), Enabled ? (hot ? Color.White : Theme.Ink) : Theme.Dim, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+    }
+    // выбор из списка стрелками ‹ значение › (щелчок слева/справа, колесо)
+    class MkChoice : Control
+    {
+        public string[] Items; public int Index; public event EventHandler Changed; int hot = 0;
+        public MkChoice(string[] items, int idx, int w) { Items = items; Index = Math.Max(0, Math.Min(items.Length - 1, idx)); Cursor = Cursors.Hand; SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true); BackColor = Color.Transparent; Font = Theme.Px(Theme.UiSemi, 13f, FontStyle.Regular); Size = new Size(w, 28); }
+        void Step(int d) { int i = Math.Max(0, Math.Min(Items.Length - 1, Index + d)); if (i == Index) return; Index = i; Invalidate(); if (Changed != null) Changed(this, EventArgs.Empty); }
+        protected override void OnMouseMove(MouseEventArgs e) { int h = e.X < Width / 3 ? -1 : e.X > Width * 2 / 3 ? 1 : 0; if (h != hot) { hot = h; Invalidate(); } base.OnMouseMove(e); }
+        protected override void OnMouseLeave(EventArgs e) { hot = 0; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) Step(e.X < Width / 2 ? -1 : 1); base.OnMouseDown(e); }
+        protected override void OnMouseWheel(MouseEventArgs e) { Step(e.Delta > 0 ? 1 : -1); base.OnMouseWheel(e); }
+        protected override void OnMouseEnter(EventArgs e) { Focus(); base.OnMouseEnter(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; Ui19.Screen(g, new RectangleF(1.5f, 1.5f, Width - 3, Height - 3), 6);
+            TextRenderer.DrawText(g, Items[Index], Font, new Rectangle(16, 0, Width - 32, Height), Theme.Ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            var f = Theme.Px(Theme.UiSemi, 15f, FontStyle.Regular);
+            TextRenderer.DrawText(g, "‹", f, new Rectangle(2, -1, 16, Height), Index > 0 ? (hot < 0 ? Color.White : Theme.Teal) : Theme.Dim, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, "›", f, new Rectangle(Width - 18, -1, 16, Height), Index < Items.Length - 1 ? (hot > 0 ? Color.White : Theme.Teal) : Theme.Dim, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
+    class MkSwatch : Control
+    {
+        public Color Value; public event EventHandler Changed; bool hot;
+        public MkSwatch(Color c) { Value = c; Cursor = Cursors.Hand; SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true); BackColor = Color.Transparent; Size = new Size(28, 28); }
+        protected override void OnMouseEnter(EventArgs e) { hot = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hot = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnClick(EventArgs e)
+        {
+            using (var d = new ColorDialog { Color = Value, FullOpen = true, AnyColor = true })
+                if (d.ShowDialog(FindForm()) == DialogResult.OK) { Value = d.Color; Invalidate(); if (Changed != null) Changed(this, e); }
+            base.OnClick(e);
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var b = new SolidBrush(Value)) g.FillEllipse(b, 4, 4, Width - 9, Height - 9);
+            using (var pen = new Pen(hot ? Color.White : Color.FromArgb(120, 255, 255, 255), hot ? 2f : 1.2f)) g.DrawEllipse(pen, 3, 3, Width - 7, Height - 7);
+        }
+    }
+    class MkPos : Control
+    {
+        public int Value; public event EventHandler Changed; int hot = -1;
+        public MkPos(int v) { Value = v; Cursor = Cursors.Hand; SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true); BackColor = Color.Transparent; Size = new Size(84, 54); }
+        int At(Point p) { int c = Math.Min(2, Math.Max(0, p.X * 3 / Width)), r = Math.Min(2, Math.Max(0, p.Y * 3 / Height)); return r * 3 + c; }
+        protected override void OnMouseMove(MouseEventArgs e) { int h = At(e.Location); if (h != hot) { hot = h; Invalidate(); } base.OnMouseMove(e); }
+        protected override void OnMouseLeave(EventArgs e) { hot = -1; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { Value = At(e.Location); Invalidate(); if (Changed != null) Changed(this, e); base.OnMouseDown(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; Ui19.Screen(g, new RectangleF(1.5f, 1.5f, Width - 3, Height - 3), 5);
+            float cw = (Width - 8) / 3f, ch = (Height - 8) / 3f;
+            for (int i = 0; i < 9; i++)
+            {
+                var r = new RectangleF(4 + (i % 3) * cw + 3, 4 + (i / 3) * ch + 3, cw - 6, ch - 6);
+                using (var p = Theme.Round(r, 3))
+                {
+                    if (i == Value) using (var b = new SolidBrush(Theme.Teal)) g.FillPath(b, p);
+                    else using (var pen = new Pen(i == hot ? Theme.A(Theme.Teal, 0.9f) : Color.FromArgb(55, 255, 255, 255), 1f)) g.DrawPath(pen, p);
+                }
+            }
+        }
+    }
+    class MkPreview : Control
+    {
+        public MkPreview() { SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true); BackColor = Color.Transparent; }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            var r = new RectangleF(1.5f, 1.5f, Width - 3, Height - 3);
+            using (var p = Theme.Round(r, 6))
+            {
+                // «экран» с окном программы: светлый фон, как чертёж в Revit
+                using (var b = new SolidBrush(Color.FromArgb(236, 238, 240))) g.FillPath(b, p);
+                var old = g.Clip; g.SetClip(p);
+                using (var b = new SolidBrush(Color.FromArgb(205, 210, 216))) g.FillRectangle(b, 0, 0, Width, 18);
+                using (var pen = new Pen(Color.FromArgb(150, 160, 170), 1f)) for (int i = 0; i < 6; i++) g.DrawLine(pen, 20 + i * 44, 34, 20 + i * 44, Height - 20);
+                float H = Height * 6f;   // предпросмотр — уменьшенный кадр высотой ~6 окон
+                int hd = Math.Max(10, (int)(KeyLog.HaloD((int)H) * KeyLog.HaloSize / 100.0 / 6 * 1.6)), rd = Math.Max(10, (int)(KeyLog.ClickD((int)H) * KeyLog.ClickSize / 100.0 / 6 * 1.6));
+                PointF c1 = new PointF(Width * 0.36f, Height * 0.40f), c2 = new PointF(Width * 0.70f, Height * 0.55f);
+                if (KeyLog.Halo) using (var hb = KeyLog.HaloBmp(hd, KeyLog.HaloColor, KeyLog.HaloOp / 100f)) g.DrawImage(hb, c1.X - hd / 2f, c1.Y - hd / 2f);
+                if (KeyLog.Clicks)
+                {
+                    using (var cb = KeyLog.ClickBmp(rd, KeyLog.ClickL, 1f)) g.DrawImage(cb, c1.X - rd / 2f, c1.Y - rd / 2f);
+                    using (var cb = KeyLog.ClickBmp(rd, KeyLog.ClickR, 1f)) g.DrawImage(cb, c2.X - rd / 2f, c2.Y - rd / 2f);
+                }
+                if (KeyLog.Cursor) foreach (var c in new[] { c1, c2 }) Arrow(g, c);
+                if (KeyLog.Keys)
+                {
+                    string t = KeyLog.KeyAll ? "FGDGG" : "Ctrl + Z"; float fs = KeyLog.KeyFs((int)H) / 6f * 1.6f;
+                    var sz = KeyLog.KeyTextSize(t, fs); int row = KeyLog.KeyPos / 3, col = KeyLog.KeyPos % 3; float m = fs * 0.6f;
+                    float x = col == 0 ? m : col == 1 ? (Width - sz.Width) / 2 : Width - m - sz.Width, y = row == 0 ? 20 + m * 0.4f : row == 1 ? (Height - sz.Height) / 2 : Height - sz.Height - m * 0.7f;
+                    KeyLog.DrawKeyText(g, t, fs, x, y);
+                }
+                g.Clip = old;
+                using (var pen = new Pen(Theme.A(Theme.Teal, 0.55f), 1.2f)) g.DrawPath(pen, p);
+            }
+        }
+        static void Arrow(Graphics g, PointF c)
+        {
+            var pts = new[] { new PointF(0, 0), new PointF(0, 17), new PointF(4.5f, 13), new PointF(7.5f, 19.5f), new PointF(10, 18.5f), new PointF(7, 12), new PointF(12.5f, 12) };
+            for (int i = 0; i < pts.Length; i++) pts[i] = new PointF(c.X + pts[i].X, c.Y + pts[i].Y);
+            using (var b = new SolidBrush(Color.White)) g.FillPolygon(b, pts);
+            using (var pen = new Pen(Color.Black, 1.2f) { LineJoin = LineJoin.Round }) g.DrawPolygon(pen, pts);
+        }
+    }
+    class MouseKeysForm : XyzForm
+    {
+        readonly Settings cfg; readonly MkPreview prev = new MkPreview();
+        static readonly int[] Pcts = { 50, 75, 100, 125, 150, 200 };
+        static readonly int[] Ops = { 15, 25, 35, 45, 55, 70, 85 };
+        static int Near(int[] a, int v) { int bi = 0; for (int i = 0; i < a.Length; i++) if (Math.Abs(a[i] - v) < Math.Abs(a[bi] - v)) bi = i; return bi; }
+        static string[] Pct(int[] a) { var s = new string[a.Length]; for (int i = 0; i < a.Length; i++) s[i] = a[i] + " %"; return s; }
+        Label L(string t, int x, int y, bool head)
+        {
+            var l = new Label { Text = t, AutoSize = true, BackColor = Color.Transparent, ForeColor = head ? Theme.Teal : Theme.Mute, Font = Theme.Px(head ? Theme.UiSemi : Theme.UiFam, head ? 14f : 12.5f, FontStyle.Regular), Location = new Point(x, y) };
+            Controls.Add(l); return l;
+        }
+        T Add<T>(T c, int x, int y) where T : Control { c.Location = new Point(x, y); Controls.Add(c); return c; }
+        public MouseKeysForm(Settings c)
+        {
+            cfg = c; KeyLog.LoadCfg(c);
+            Caption = "Мышь и клавиатура в записи"; Text = "Мышь и клавиатура — XYZ Запись";
+            ShowInTaskbar = false; StartPosition = FormStartPosition.Manual; KeyPreview = true;
+            ClientSize = new Size(760, 470);
+            EventHandler upd = (o, e) => prev.Invalidate();
+            int x0 = 18, y = HeadH + 14, cx = 250;
+            // курсор
+            L("Курсор", x0, y, true); y += 28;
+            var cur = Add(new MkCheck("Показывать курсор в записи", KeyLog.Cursor), x0, y); cur.Changed += (o, e) => { KeyLog.Cursor = cur.Checked; upd(o, e); }; y += 40;
+            // щелчки
+            L("Эффекты щелчков", x0, y, true); y += 28;
+            var clk = Add(new MkCheck("Показывать щелчки", KeyLog.Clicks), x0, y); clk.Changed += (o, e) => { KeyLog.Clicks = clk.Checked; upd(o, e); };
+            L("Размер", x0 + 170, y + 3, false);
+            var cs = Add(new MkChoice(Pct(Pcts), Near(Pcts, KeyLog.ClickSize), 92), x0 + 222, y - 2); cs.Changed += (o, e) => { KeyLog.ClickSize = Pcts[cs.Index]; upd(o, e); };
+            L("Левая", x0 + 326, y + 3, false);
+            var cl = Add(new MkSwatch(KeyLog.ClickL), x0 + 368, y - 2); cl.Changed += (o, e) => { KeyLog.ClickL = cl.Value; upd(o, e); };
+            L("Правая", x0 + 404, y + 3, false);
+            var cr = Add(new MkSwatch(KeyLog.ClickR), x0 + 452, y - 2); cr.Changed += (o, e) => { KeyLog.ClickR = cr.Value; upd(o, e); }; y += 46;
+            // подсветка
+            L("Подсветка курсора", x0, y, true); y += 28;
+            var hl = Add(new MkCheck("Подсвечивать курсор", KeyLog.Halo), x0, y); hl.Changed += (o, e) => { KeyLog.Halo = hl.Checked; upd(o, e); };
+            L("Размер", x0 + 170, y + 3, false);
+            var hs = Add(new MkChoice(Pct(Pcts), Near(Pcts, KeyLog.HaloSize), 92), x0 + 222, y - 2); hs.Changed += (o, e) => { KeyLog.HaloSize = Pcts[hs.Index]; upd(o, e); };
+            L("Цвет", x0 + 326, y + 3, false);
+            var hc = Add(new MkSwatch(KeyLog.HaloColor), x0 + 368, y - 2); hc.Changed += (o, e) => { KeyLog.HaloColor = hc.Value; upd(o, e); };
+            y += 36;
+            L("Непрозрачность в центре", x0 + 24, y + 3, false);
+            var ho = Add(new MkChoice(Pct(Ops), Near(Ops, KeyLog.HaloOp), 92), x0 + 222, y - 2); ho.Changed += (o, e) => { KeyLog.HaloOp = Ops[ho.Index]; upd(o, e); };
+            y += 44;
+            // клавиатура
+            L("Клавиатура", x0, y, true); y += 28;
+            var kb = Add(new MkCheck("Показывать нажатия клавиш", KeyLog.Keys), x0, y); kb.Changed += (o, e) => { KeyLog.Keys = kb.Checked; upd(o, e); };
+            y += 34;
+            L("Что показывать", x0 + 24, y + 3, false);
+            var km = Add(new MkChoice(new[] { "Только сочетания и служебные", "Все нажатия" }, KeyLog.KeyAll ? 1 : 0, 250), x0 + 150, y - 2); km.Changed += (o, e) => { KeyLog.KeyAll = km.Index == 1; upd(o, e); };
+            y += 36;
+            L("Размер текста", x0 + 24, y + 3, false);
+            var ks = Add(new MkChoice(new[] { "Мелкий", "Средний", "Крупный" }, KeyLog.KeySize, 130), x0 + 150, y - 2); ks.Changed += (o, e) => { KeyLog.KeySize = ks.Index; upd(o, e); };
+            L("Позиция", x0 + 300, y + 3, false);
+            var kp = Add(new MkPos(KeyLog.KeyPos), x0 + 362, y - 10); kp.Changed += (o, e) => { KeyLog.KeyPos = kp.Value; upd(o, e); };
+            // предпросмотр справа
+            int px = 520; L("Так будет в ролике", px, HeadH + 14, true);
+            prev.Location = new Point(px, HeadH + 42); prev.Size = new Size(ClientSize.Width - px - 18, 220); Controls.Add(prev);
+            var hint = L("Курсор, щелчки и клавиши рисуются только в ролике\nпосле «Стоп» — на экране во время записи их нет.\nЗапись клавиш: только пока идёт запись.", px, HeadH + 272, false);
+            hint.MaximumSize = new Size(ClientSize.Width - px - 12, 0);
+            // кнопки
+            var ok = Ui19.Btn("Сохранить", true); var no = Ui19.Btn("Отмена", false);
+            no.Location = new Point(ClientSize.Width - no.Width - 14, ClientSize.Height - no.Height - 12);
+            ok.Location = new Point(no.Left - ok.Width - 6, no.Top);
+            ok.Click += (o, e) => { KeyLog.SaveCfg(cfg); Engine.DrawMouse = KeyLog.Cursor; DialogResult = DialogResult.OK; Close(); };
+            no.Click += (o, e) => { KeyLog.LoadCfg(cfg); Close(); };
+            Controls.Add(ok); Controls.Add(no);
+            FormClosed += (o, e) => { if (DialogResult != DialogResult.OK) KeyLog.LoadCfg(cfg); };
+        }
+        protected override bool ProcessCmdKey(ref Message msg, Keys k) { if (k == System.Windows.Forms.Keys.Escape) { Close(); return true; } return base.ProcessCmdKey(ref msg, k); }
     }
 
     // v19.4: ролик с диска в «Обрезать» и пункт в меню Проводника (HKCU, без прав администратора)
@@ -3637,7 +4047,7 @@ namespace XyzRecorder
 
     class AboutForm : Form
     {
-        public const string Version = "v19.11";
+        public const string Version = "v19.12";
         public const float W = 500, H = 268;
         public const string UrlTg = "https://t.me/xyz_for_revit", UrlGh = "https://github.com/Budzhak/XYZ", UrlFf = "https://ffmpeg.org";
         float s; public bool Exclude;
@@ -4306,13 +4716,10 @@ namespace XyzRecorder
             var shx = new ToolStripMenuItem("«Обрезать» в меню Проводника") { Checked = TrimFiles.ShellOn() };
             shx.ToolTipText = "Правой кнопкой по видео (mp4, mkv, mov, avi) → «Обрезать в XYZ Запись».\nВ Windows 11 — в «Показать дополнительные параметры».";
             shx.Click += (o, e) => { bool on = !TrimFiles.ShellOn(); string err = TrimFiles.SetShell(on); if (err != null) MessageBox.Show(err, "XYZ Запись"); };
-            var hl = new ToolStripMenuItem("Подсвечивать курсор в записи") { Checked = cfg.Get("halo", "1") == "1" };   // v19.8
-            hl.ToolTipText = "Жёлтый полупрозрачный круг вокруг курсора — только в ролике.";
-            hl.Click += (o, e) => { bool on = cfg.Get("halo", "1") != "1"; cfg.Set("halo", on ? "1" : "0"); cfg.Save(); };
-            var kk = new ToolStripMenuItem("Показывать нажатия в записи") { Checked = cfg.Get("keys", "1") == "1" };   // v19.8
-            kk.ToolTipText = "Сочетания клавиш (Ctrl+Z, Esc, Tab…) — табличкой слева внизу ролика, щелчки мыши — кружками.\nОбычный набор текста не записывается. На экране во время записи ничего не видно.";
-            kk.Click += (o, e) => { bool on = cfg.Get("keys", "1") != "1"; cfg.Set("keys", on ? "1" : "0"); cfg.Save(); };
-            m.Items.AddRange(new ToolStripItem[] { cm, new ToolStripSeparator(), f1, f2, rw, tr, shx, new ToolStripSeparator(), VoiceItem(), new ToolStripSeparator(), r1, r2, kk, hl, aft, new ToolStripSeparator(), sk1, pal, c1, c2, new ToolStripSeparator(), t1, ab, x1 });
+            var mk = new ToolStripMenuItem("Мышь и клавиатура в записи…");   // v19.12: вместо двух флажков v19.8 — окно как у Bandicam
+            mk.ToolTipText = "Подсветка курсора, вспышки щелчков (левая — красная, правая — синяя), нажатия клавиш крупным текстом.\nРисуется только в ролике после «Стоп».";
+            mk.Click += (o, e) => BeginInvoke(new Action(ShowMouseKeys));
+            m.Items.AddRange(new ToolStripItem[] { cm, new ToolStripSeparator(), f1, f2, rw, tr, shx, new ToolStripSeparator(), VoiceItem(), new ToolStripSeparator(), r1, r2, mk, aft, new ToolStripSeparator(), sk1, pal, c1, c2, new ToolStripSeparator(), t1, ab, x1 });
             return m;
         }
 
@@ -4323,6 +4730,19 @@ namespace XyzRecorder
                 try { if (Directory.Exists(Folder)) d.InitialDirectory = Folder; } catch { }
                 if (d.ShowDialog(this) != DialogResult.OK) return;
                 TrimFiles.Launch(d.FileName);   // v19.5: отдельное окно, запись можно вести параллельно
+            }
+        }
+
+        void ShowMouseKeys()
+        {
+            if (state != St.Idle) { SetStatus("Настройки мыши и клавиатуры — после записи", true); return; }
+            using (var f = new MouseKeysForm(cfg))
+            {
+                var wa = Screen.FromControl(this).WorkingArea;
+                int x = Left + Width / 2 - f.Width / 2, y = Top + Height / 2 - f.Height / 2;
+                f.Location = new Point(Math.Max(wa.X, Math.Min(x, wa.Right - f.Width)), Math.Max(wa.Y, Math.Min(y, wa.Bottom - f.Height)));
+                f.TopMost = TopMost;
+                f.ShowDialog(this);
             }
         }
 
@@ -4638,6 +5058,7 @@ namespace XyzRecorder
             eng.Mic = m != null ? m.Arg : null;
             eng.MicName = m != null ? m.Name : null;
             if (testing) return;
+            KeyLog.LoadCfg(cfg); Engine.DrawMouse = KeyLog.Cursor;   // v19.12
             eng.Segments.Clear();
             eng.WorkDir = Path.Combine(Path.GetTempPath(), "xyz_rec", DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             Directory.CreateDirectory(eng.WorkDir);
@@ -4684,8 +5105,8 @@ namespace XyzRecorder
             if (exclFail) SetStatus("Windows не дала скрыть прибор из записи — он попадёт в ролик.", true);
             else SetStatus(micWarn ?? "", micWarn != null);
             sw.Start(); state = St.Rec;
-            KeyLog.Keys = cfg.Get("keys", "1") == "1"; KeyLog.Halo = cfg.Get("halo", "1") == "1";
-            keysRec = KeyLog.Keys || KeyLog.Halo;   // v19.8: показ нажатий и подсветка курсора
+            KeyLog.LoadCfg(cfg);
+            keysRec = KeyLog.Keys || KeyLog.Clicks || KeyLog.Halo;   // v19.8: показ нажатий и подсветка курсора (v19.12: + щелчки отдельно)
             if (keysRec) { try { KeyLog.Start(); } catch { keysRec = false; } }
             UpdateButtons(); UpdateTime();
             StartMeter(false);
@@ -4732,6 +5153,8 @@ namespace XyzRecorder
             var th = new Thread(() =>
             {
                 bool ok = eng.Finalize(of);
+                if (ok && keysRec)   // v19.12: длительности сегментов — для привязки событий к кадрам (до удаления сегментов)
+                { try { var sd = new List<double>(); foreach (var sg in eng.Segments) sd.Add(TrimForm.Duration(sg)); KeyLog.SegDur = sd; } catch { } }
                 if (ok) eng.CleanupSegments();
                 if (ok && keysRec && (KeyLog.Events.Count > 0 || KeyLog.Moves.Count > 0))   // v19.8: нажатия и курсор поверх видео
                 {
@@ -4979,7 +5402,8 @@ namespace XyzRecorder
                 if (k == "--snapshot-about") return Snapshot11("about");
                 if (k == "--snapshot-palettes") return SnapshotPalettes();   // v19
                 if (k == "--snapshot-toast") return SnapshotToast(i + 1 < args.Length ? args[i + 1] : "test.mp4");   // v19
-                if (k == "--keystest") return KeyLog.SelfTest(i + 1 < args.Length ? args[i + 1] : "test.mp4");   // v19.8
+                if (k == "--keystest") return KeyLog.SelfTest(i + 1 < args.Length ? args[i + 1] : "test.mp4", i + 2 < args.Length && args[i + 2].Trim().ToLower() == "all");   // v19.8, v19.12: all — «все нажатия»
+                if (k == "--snapshot-mousekeys") return SnapshotMouseKeys();   // v19.12
                 if (k == "--snapshot-region") return Snapshot11("region");
                 if (k == "--regiontest") return RegionTest(i + 1 < args.Length ? args[i + 1] : "100,100,640,360");
                 if (k == "--capturetest") return CaptureTest(i + 1 < args.Length ? args[i + 1].Trim().ToLower() : "full", i + 2 < args.Length ? args[i + 2] : null);   // v13
@@ -5020,6 +5444,21 @@ namespace XyzRecorder
         static void Save(Bitmap b, string dir, string name) { if (b == null) return; b.Save(Path.Combine(dir, name), ImageFormat.Png); b.Dispose(); }
 
         // Ключ --snapshot (v8): кадры прибора в test\v8_*.png (окно не показывается), кадр ARGB с прозрачностью.
+        static int SnapshotMouseKeys()   // v19.12: окно «Мышь и клавиатура» в PNG (настройки из ini, не сохраняются)
+        {
+            string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", "mk19"); Directory.CreateDirectory(dir);
+            Settings.ReadOnly = true; var cfg = Settings.Load();
+            try { Theme.ApplyPal(cfg.Get("palette", "mint")); } catch { }
+            using (var frm = new MouseKeysForm(cfg))
+            {
+                frm.Opacity = 0.01; frm.Show(); Application.DoEvents();
+                frm.Location = new Point(-5000, -5000); frm.Opacity = 1; frm.Refresh(); Application.DoEvents(); Thread.Sleep(150); Application.DoEvents();
+                using (var bm = new Bitmap(frm.Width, frm.Height)) { frm.DrawToBitmap(bm, new Rectangle(0, 0, frm.Width, frm.Height)); bm.Save(Path.Combine(dir, "mousekeys.png")); }
+                frm.Close();
+            }
+            return 0;
+        }
+
         static int SnapshotToast(string mp4)   // v19: окошко «Сохранено» и «Обрезать» в каждом облике — в PNG
         {
             string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test", "toast19");
