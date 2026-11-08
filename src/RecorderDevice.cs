@@ -1,6 +1,6 @@
 ﻿// XYZ Запись v19.15 (09.11.2026): сдвиг первого кадра до 20 с принимается (у db ffmpeg стартовал 4 с — события уезжали на 4 с). v19.14 (09.11.2026): ddagrab — метка кадра по часам в момент захвата (setpts=RTCTIME внутри lavfi вместо
 // -use_wallclock_as_timestamps), строка привязки нажатий/курсора (источник, ключи входа, сдвиг X, «секундомер−файл» Y) — в recorder.log;
-// запасная поправка для ddagrab — ini mk_dda_shift (с, + = подсветку позже; по умолчанию 0).
+// запасная поправка для ddagrab — ini mk_dda_shift (с, + = подсветку позже; по умолчанию 0.1 — замер 09.11: без поправки −2 кадра, с 0.1 — +1).
 // XYZ Запись v19.13 (09.11.2026): подсветка курсора и щелчки без отставания на 5 кадров (сдвиг по часам первого кадра). v19.12 (08.11.2026): показ мыши и клавиш как у Bandicam — подсветка курсора мягким градиентом без отставания
 // (время событий привязано к кадрам, интерполяция на каждый кадр), щелчки красный/синий, клавиши крупным белым текстом
 // с обводкой (9 позиций, 3 размера, «все нажатия»), окно «Мышь и клавиатура…» (ini mk_*), «Показывать курсор» (draw_mouse).
@@ -2940,7 +2940,7 @@ namespace XyzRecorder
         public static readonly List<double> SegWall = new List<double>();
         public static List<double> SegFfStart;
         public static List<string> SegSrc;     // v19.14: ddagrab / gdigrab по сегментам
-        public static double DdaShift = 0;     // v19.14: запасная поправка для ddagrab, с (ini mk_dda_shift; + — подсветка/щелчки/клавиши позже)
+        public static double DdaShift = 0.1;     // v19.14: запасная поправка для ddagrab, с (ini mk_dda_shift; + — подсветка/щелчки/клавиши позже)
         static double UnixNow() { return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds; }
         public static void Pause()
         {
@@ -2981,7 +2981,7 @@ namespace XyzRecorder
             ClickSize = Int(c, "mk_click_size", 100, 30, 300); KeyPos = Int(c, "mk_key_pos", 6, 0, 8); KeySize = Int(c, "mk_key_size", 1, 0, 2);
             HaloColor = ColParse(c.Get("mk_halo_color", ""), Color.FromArgb(255, 235, 59));
             ClickL = ColParse(c.Get("mk_click_l", ""), Color.FromArgb(255, 45, 45)); ClickR = ColParse(c.Get("mk_click_r", ""), Color.FromArgb(40, 120, 255));
-            double ds; DdaShift = double.TryParse(c.Get("mk_dda_shift", "0").Replace(',', '.'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ds) ? Math.Max(-1, Math.Min(1, ds)) : 0;
+            double ds; DdaShift = double.TryParse(c.Get("mk_dda_shift", "0.1").Replace(',', '.'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ds) ? Math.Max(-1, Math.Min(1, ds)) : 0.1;
         }
         public static void SaveCfg(Settings c)
         {
