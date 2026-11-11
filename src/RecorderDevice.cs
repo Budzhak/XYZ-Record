@@ -1,4 +1,5 @@
-﻿// XYZ Запись v19.17 (09.11.2026): звук не теряет последние ~1,7 с — после «Стоп»/«Пауза» ffmpeg пишет ещё rec_tail_ms (ini, 1800 мс),
+﻿﻿// XYZ Запись v19.18 (11.11.2026): «Обрезать» — кнопкой на панели прибора рядом с «Проверить» и «Папка» (З-И5): открыть ролик и сразу в редактор.
+// XYZ Запись v19.17 (09.11.2026): звук не теряет последние ~1,7 с — после «Стоп»/«Пауза» ffmpeg пишет ещё rec_tail_ms (ini, 1800 мс),
 // затем «q»; при склейке каждый сегмент обрезается по моменту нажатия (часы первого кадра → стоп), видео без B-кадров (-bf 0) для точной обрезки.
 // XYZ Запись v19.16 (09.11.2026): окно «Обрезать» растягивается за края и углы, кнопка «развернуть/восстановить» и двойной щелчок
 // по заголовку, видео и дорожка подстраиваются под размер; размер, положение и развёрнутость — в ini (trim_bounds, trim_max).
@@ -1183,7 +1184,8 @@ namespace XyzRecorder
     {
         public const int P = 18, CW = 636, CH = 312, GM = 14;
         public static readonly RectangleF Sel1 = new RectangleF(16, 178, 164, 26), Sel2 = new RectangleF(16, 210, 164, 26);
-        public static readonly RectangleF BTest = new RectangleF(22, 244, 82, 22), BFold = new RectangleF(112, 244, 62, 22);
+        public static readonly RectangleF BTest = new RectangleF(16, 244, 60, 22), BFold = new RectangleF(80, 244, 44, 22),
+            BTrim = new RectangleF(128, 244, 52, 22);   // v19.18: «Обрезать…» на панели прибора (З-И5)
         public static readonly RectangleF Timer = new RectangleF(214, 30, 170, 48);
         public static readonly PointF Status = new PointF(216, 86);
         public static readonly PointF Info = new PointF(388, 40);
@@ -1203,7 +1205,7 @@ namespace XyzRecorder
         public static readonly PointF QPause = new PointF(244, 28), QStop = new PointF(280, 28); public const float QR = 15;
     }
 
-    enum Hit { None = 0, Sel1, Sel2, Test, Folder, Min, Close, PadRec, PadPause, PadStop, Toggle, Screen, Body, QPause, QStop, Skin, CRec, CPause, CStop, CMin, CClose }
+    enum Hit { None = 0, Sel1, Sel2, Test, Folder, Min, Close, PadRec, PadPause, PadStop, Toggle, Screen, Body, QPause, QStop, Skin, CRec, CPause, CStop, CMin, CClose, Trim }
 
     class UiState
     {
@@ -1444,6 +1446,7 @@ namespace XyzRecorder
             if (Lay.Sel2.Contains(lp)) return Hit.Sel2;
             if (Lay.BTest.Contains(lp)) return Hit.Test;
             if (Lay.BFold.Contains(lp)) return Hit.Folder;
+            if (Lay.BTrim.Contains(lp)) return Hit.Trim;
             if (Dist(lp, Lay.BMin) <= Lay.BR + 2) return Hit.Min;
             if (Dist(lp, Lay.BClose) <= Lay.BR + 2) return Hit.Close;
             for (int i = 0; i < 3; i++) { var r = Lay.Pads[i]; r.Inflate(2, 2); if (r.Contains(lp)) return Hit.PadRec + i; }
@@ -1641,7 +1644,8 @@ namespace XyzRecorder
             DrawSelector(g, s, st, Hit.Sel1, R(Lay.Sel1, s), st.Area, 0);
             DrawSelector(g, s, st, Hit.Sel2, R(Lay.Sel2, s), st.MicOn ? st.Mic : "Без звука", st.MicOn ? 1 : 2);
             DrawPill(g, s, st, Hit.Test, R(Lay.BTest, s), st.TestText);
-            DrawPill(g, s, st, Hit.Folder, R(Lay.BFold, s), "Папка…");
+            DrawPill(g, s, st, Hit.Folder, R(Lay.BFold, s), "Папка");
+            DrawPill(g, s, st, Hit.Trim, R(Lay.BTrim, s), "Обрезать");
 
             // ---- пэды ----
             Color[] pc = { Theme.Red, Theme.Amber, Color.FromArgb(225, 232, 240) };
@@ -4762,6 +4766,7 @@ namespace XyzRecorder
                 case Hit.Sel2: ShowMicMenu(); break;
                 case Hit.Test: TestMic(); break;
                 case Hit.Folder: ChooseFolder(); break;
+                case Hit.Trim: TrimPick(); break;
                 case Hit.Min: PowerOff(); break;
                 case Hit.Close: ExitApp(); break;
                 case Hit.PadRec: StartRec(); break;
@@ -5088,6 +5093,7 @@ namespace XyzRecorder
             ui.En[(int)Hit.Sel1] = idle;
             ui.En[(int)Hit.Sel2] = idle && !testing;
             ui.En[(int)Hit.Folder] = idle;
+            ui.En[(int)Hit.Trim] = true;   // v19.18: редактор — отдельным процессом, доступен и во время записи
             ui.En[(int)Hit.Test] = idle && micOn && mics.Count > 0 && !testing;
             ui.En[(int)Hit.Min] = state != St.Saving;
             ui.En[(int)Hit.Close] = true;
